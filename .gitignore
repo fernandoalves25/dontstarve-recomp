@@ -1,0 +1,29 @@
+# --- External tooling / reference (cloned separately, not vendored) ---
+/pcrecomp/
+/nfsu2-ref/
+
+# --- Prior work from sibling/parent sessions, quarantined (not this track) ---
+/_ref/
+
+# --- Game-derived material: NEVER commit (copyright + see pcrecomp PUBLISHING.md) ---
+/work/
+*.exe
+*.dll
+# Lifted C is derived from the game binary -> treat as game material
+/src/recomp/
+recomp_*.c
+catalog*.json
+*_seeds.json
+
+# --- Build output ---
+/build/
+*.o
+*.obj
+*.a
+*.so
+*.aarch64
+
+# --- Misc ---
+__pycache__/
+*.pyc
+.DS_Store
