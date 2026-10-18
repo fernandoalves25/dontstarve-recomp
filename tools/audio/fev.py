@@ -109,42 +109,46 @@ def read_sounddefs(L, S, at):
 
 
 def walk(path, simple_off=172):
-    """Event tree -> [{path, type, raw: [sound def indices], ...}].
+    """Event tree -> (parsed, sound defs, [{path, type, raw: [sound def indices]}]).
     Groups: u32 name, u32 nprops (0 here), u32 nsubgroups, u32 nevents,
     subgroups, events. An event starts u32 type (0x10 simple, 8 complex),
     u32 name, 16-byte GUID, and ends with its category path string. A simple
     event's sound definition is the u16 at +172; a complex event's sound
     instances are u16 indices after the bytes 01 00 01 00 (found by scan)."""
-        P=parse(path); L=P['L']; S=P['S']
-        at, defs = find_sounddefs(L,S)
-        catpaths=set(); stack=[]
-        for l in P['cats']:
-            d=(len(l)-len(l.lstrip(' ')))//2; nm=l.strip().split(' ')[0]
-            stack=stack[:d]+[nm]; catpaths.add('/'.join(stack[1:]) if d>0 else nm)
-        pats=[struct.pack('<I',len(c)+1)+c.encode()+b'\0' for c in catpaths]
-        r=R(L, P['r'].p); events=[]
-        def find_cat(p):
-            best=None
-            for b in pats:
-                j=L.find(b,p,at)
-                if j>=0 and (best is None or j<best[0]): best=(j,len(b))
-            return best
-        def parse_event(gp):
-            st=r.p; typ=r.u32(); name=S[r.u32()]
-            j,n=find_cat(st+8); body=L[st:j]
-            if typ==0x10: raws=[struct.unpack_from('<H',L,st+simple_off)[0]]
-            else: raws=[struct.unpack('<H',m.group(1))[0] for m in re.finditer(rb'\x01\x00\x01\x00(..)', body, re.S)]
-            events.append(dict(path=gp+'/'+name, type=typ, raw=raws, st=st, end=j+n)); r.p=j+n
-        def parse_group(gp):
-            name=S[r.u32()]; nprops=r.u32()
-            assert nprops==0, (gp, name, hex(r.p))
-            nsub=r.u32(); nev=r.u32()
-            for _ in range(nsub): parse_group(gp+'/'+name)
-            for _ in range(nev): parse_event(gp+'/'+name)
-        ng=r.u32()
-        for _ in range(ng): parse_group(P['proj'])
-        return P, defs, events
+    P = parse(path); L = P["L"]; S = P["S"]
+    at, defs = find_sounddefs(L, S)
+    catpaths = set(); stack = []
+    for l in P["cats"]:
+        d = (len(l) - len(l.lstrip(" "))) // 2; nm = l.strip().split(" ")[0]
+        stack = stack[:d] + [nm]; catpaths.add("/".join(stack[1:]) if d > 0 else nm)
+    pats = [struct.pack("<I", len(c) + 1) + c.encode() + b"\0" for c in catpaths]
+    r = R(L, P["r"].p); events = []
 
+    def find_cat(p):
+        best = None
+        for b in pats:
+            j = L.find(b, p, at)
+            if j >= 0 and (best is None or j < best[0]): best = (j, len(b))
+        return best
+
+    def parse_event(gp):
+        st = r.p; typ = r.u32(); name = S[r.u32()]
+        j, n = find_cat(st + 8); body = L[st:j]
+        if typ == 0x10:
+            raws = [struct.unpack_from("<H", L, st + simple_off)[0]]
+        else:
+            raws = [struct.unpack("<H", m.group(1))[0] for m in re.finditer(rb"\x01\x00\x01\x00(..)", body, re.S)]
+        events.append(dict(path=gp + "/" + name, type=typ, raw=raws, st=st, end=j + n)); r.p = j + n
+
+    def parse_group(gp):
+        name = S[r.u32()]; nprops = r.u32()
+        assert nprops == 0, (gp, name, hex(r.p))
+        nsub = r.u32(); nev = r.u32()
+        for _ in range(nsub): parse_group(gp + "/" + name)
+        for _ in range(nev): parse_event(gp + "/" + name)
+
+    for _ in range(r.u32()): parse_group(P["proj"])
+    return P, defs, events
 
 
 def dump(L, S, a, n):
