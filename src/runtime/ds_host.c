@@ -16,6 +16,7 @@
 #include <strings.h>
 #include <pthread.h>
 #include <signal.h>
+#include <execinfo.h>
 #include <sys/mman.h>
 #include "ds_hle.h"
 #include "pe_format.h"
@@ -418,6 +419,11 @@ static void crash_handler(int sig, siginfo_t *si, void *uc) {
     else
         fprintf(stderr, "[ds] fault is a HOST address (not in the guest arena)\n");
     fprintf(stderr, "[ds] arena base host %p\n", (void *)(uintptr_t)g_mem_base);
+    /* Host C backtrace = the guest call chain (recomp uses real C calls). Names
+     * resolve with -rdynamic; this is our gdb-free backtrace. */
+    void *bt[48]; int nbt = backtrace(bt, 48);
+    fprintf(stderr, "[ds] host/guest backtrace (%d frames):\n", nbt); fflush(stderr);
+    backtrace_symbols_fd(bt, nbt, 2);
     fprintf(stderr, "[ds] recent indirect calls (newest last):\n");
     for (int i = 0; i < 8; i++) {
         uint32_t idx = (g_icall_trace_idx - 8 + (uint32_t)i) & (ICALL_TRACE_SIZE - 1);
