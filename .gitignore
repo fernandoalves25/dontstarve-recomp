@@ -30,3 +30,6 @@ __pycache__/
 
 # auto-generated data-as-code exclude list (regenerate with find_data_funcs.py)
 /config/exclude.txt
+
+# never commit archives (game files travel as zips)
+*.zip
