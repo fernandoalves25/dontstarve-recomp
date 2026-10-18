@@ -603,4 +603,6 @@ void ds_host_init(void) {
     ds_register(ds_file);
     ds_register(ds_net);
     ds_register(ds_thread);
+    ds_register(ds_gles);
+    ds_register(ds_input);
 }

@@ -1,0 +1,202 @@
+From 05f4134f90163436f03ac90fd29b6bfdbee76f70 Mon Sep 17 00:00:00 2001
+From: Fernando Alves <67828493+fernandoalves25@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 17:39:31 +0000
+Subject: [PATCH] lift32: fcomi/fucomi[p] (Capstone fcompi/fucompi), ST(i)
+ operand, FK_FCOMI
+
+Capstone spells the popping P6 compares fcompi/fucompi, so only the Intel
+spellings (fcomip/fucomip) were matched and every Capstone site lifted to
+RECOMP_UNIMPL (3,835 in Don't Starve); fcomi/fucomi were not handled at all.
+The popping forms also always compared with ST(1), ignoring the operand.
+
+These write ZF/PF/CF directly, so they get their own flag kind, FK_FCOMI:
+recomp_eflags derives the three flags (unordered sets all three), and
+recomp_cond treats it like FK_FCOM. The inline jcc mapping for fcom/fcomi
+now gives unordered its real flags (jp/jnp, and CF=ZF=1 for jb/jbe/je),
+matching the runtime path. FK_FCOM (fcom without sahf) still reports no
+EFLAGS, as on hardware.
+
+difftest: 17 new fcomi-family cases (less/greater/equal/NaN for each form,
+and an ST(2) operand); link with -lm so it builds on Linux. 263/263 match.
+---
+ runtime/recomp32/recomp_types.h | 15 ++++++++++--
+ tools/lift/difftest.py          | 41 ++++++++++++++++++++++++++++++++-
+ tools/lift/lift32.py            | 38 ++++++++++++++++++++++++------
+ 3 files changed, 84 insertions(+), 10 deletions(-)
+
+diff --git a/runtime/recomp32/recomp_types.h b/runtime/recomp32/recomp_types.h
+index 5286bd3..af42a7b 100644
+--- a/runtime/recomp32/recomp_types.h
++++ b/runtime/recomp32/recomp_types.h
+@@ -390,7 +390,11 @@ enum {
+      * is read from its own bit. The lazy triple cannot express an arbitrary
+      * combination of flags, and a program that restores a saved EFLAGS is
+      * asking for exactly that. */
+-    FK_EFLAGS
++    FK_EFLAGS,
++    /* fcomi/fucomi[p]: the fcom result, but written straight into EFLAGS
++     * (ZF/PF/CF; OF/SF/AF cleared). FK_FCOM is for fcom, which leaves EFLAGS
++     * alone and only reaches them through fnstsw + sahf. */
++    FK_FCOMI
+ };
+ 
+ /* A NARROW setter's kind carries its left-align shift (24 for 8-bit, 16 for
+@@ -425,7 +429,7 @@ static inline int recomp_cond(uint32_t kind, uint32_t a, uint32_t b, int cc) {
+         goto decide;
+     }
+ 
+-    if (kind == FK_FCOM) {
++    if (kind == FK_FCOM || kind == FK_FCOMI) {
+         int32_t v = (int32_t)a;          /* -1 less, 0 equal, 1 greater, 2 unordered */
+         if (v == 2) {                    /* NaN: ZF = PF = CF = 1, as fcomi/sahf leave them */
+             switch (cc) {
+@@ -594,6 +598,13 @@ static inline uint32_t recomp_eflags(uint32_t kind, uint32_t a, uint32_t b,
+         return (df < 0) ? (e | 0x400u) : e;
+     }
+ 
++    if (kind == FK_FCOMI) {
++        int32_t v = (int32_t)a;          /* unordered sets all three */
++        e = RECOMP_EFLAGS_FIXED | ((v < 0 || v == 2) ? 1u : 0u) | (v == 2 ? 4u : 0u)
++          | ((v == 0 || v == 2) ? 0x40u : 0u);
++        return (df < 0) ? (e | 0x400u) : e;
++    }
++
+     switch (kind) {
+     case FK_ADD: case FK_INC:
+         r  = a + b;
+diff --git a/tools/lift/difftest.py b/tools/lift/difftest.py
+index 9a363df..c3c1a22 100644
+--- a/tools/lift/difftest.py
++++ b/tools/lift/difftest.py
+@@ -143,6 +143,45 @@ CASES = [
+          mem={SCRATCH: struct.pack('<ff', 0.5, 1.0)}, undef=('AF',)),
+     Case('fpu.fucompp-nan', bytes.fromhex('d906d94604dae9dfe0f6c4440f9ac1'),
+          mem={SCRATCH: struct.pack('<ff', float('nan'), 1.0)}, undef=('AF',)),
++    # fcomi family: ST(0) vs ST(i) straight into ZF/PF/CF. fld a; fld b; then
++    # the compare, then setp cl; seta dl; setb bl; sete al -- MSVC's NaN test
++    # and the unsigned jccs. Capstone's fcompi/fucompi spellings used to lift
++    # to RECOMP_UNIMPL, and the popping forms always compared with ST(1).
++    Case('fpu.fucomip-less', bytes.fromhex('d906d94604dfe90f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', 2.0, 1.0)}, undef=('AF',)),
++    Case('fpu.fucomip-greater', bytes.fromhex('d906d94604dfe90f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', 1.0, 2.0)}, undef=('AF',)),
++    Case('fpu.fucomip-equal', bytes.fromhex('d906d94604dfe90f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', 1.0, 1.0)}, undef=('AF',)),
++    Case('fpu.fucomip-nan', bytes.fromhex('d906d94604dfe90f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', float('nan'), 1.0)}, undef=('AF',)),
++    Case('fpu.fcomip-less', bytes.fromhex('d906d94604dff10f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', 2.0, 1.0)}, undef=('AF',)),
++    Case('fpu.fcomip-greater', bytes.fromhex('d906d94604dff10f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', 1.0, 2.0)}, undef=('AF',)),
++    Case('fpu.fcomip-equal', bytes.fromhex('d906d94604dff10f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', 1.0, 1.0)}, undef=('AF',)),
++    Case('fpu.fcomip-nan', bytes.fromhex('d906d94604dff10f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', float('nan'), 1.0)}, undef=('AF',)),
++    Case('fpu.fucomi-less', bytes.fromhex('d906d94604dbe90f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', 2.0, 1.0)}, undef=('AF',)),
++    Case('fpu.fucomi-greater', bytes.fromhex('d906d94604dbe90f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', 1.0, 2.0)}, undef=('AF',)),
++    Case('fpu.fucomi-equal', bytes.fromhex('d906d94604dbe90f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', 1.0, 1.0)}, undef=('AF',)),
++    Case('fpu.fucomi-nan', bytes.fromhex('d906d94604dbe90f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', float('nan'), 1.0)}, undef=('AF',)),
++    Case('fpu.fcomi-less', bytes.fromhex('d906d94604dbf10f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', 2.0, 1.0)}, undef=('AF',)),
++    Case('fpu.fcomi-greater', bytes.fromhex('d906d94604dbf10f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', 1.0, 2.0)}, undef=('AF',)),
++    Case('fpu.fcomi-equal', bytes.fromhex('d906d94604dbf10f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', 1.0, 1.0)}, undef=('AF',)),
++    Case('fpu.fcomi-nan', bytes.fromhex('d906d94604dbf10f9ac10f97c20f92c30f94c0'),
++         mem={SCRATCH: struct.pack('<ff', float('nan'), 1.0)}, undef=('AF',)),
++    # fld a; fld b; fld c; fucomip st(2): compares c with a, not with b.
++    Case('fpu.fucomip-st2', bytes.fromhex('d906d94604d94608dfea0f97c20f92c3'),
++         mem={SCRATCH: struct.pack('<fff', 1.0, 5.0, 3.0)}, undef=('AF',)),
+     # MSVC's `x < 0.0`: fld; fcomp; fnstsw ax; test ah, 5; setp cl. PF must be
+     # the parity of (ah & 5) -- it was a constant, so the branch never varied.
+     Case('fpu.lt-zero-parity-neg', bytes.fromhex('d906d85e04dfe0f6c4050f9ac1'),
+@@ -943,7 +982,7 @@ def run_lifted(cases, workdir, keep):
+     # rather than the first that exists.
+     err = ''
+     for cc in compilers():
+-        r = subprocess.run([cc, '-O0', '-g', '-w', '-I', include, src, '-o', exe],
++        r = subprocess.run([cc, '-O0', '-g', '-w', '-I', include, src, '-o', exe, '-lm'],
+                            capture_output=True, text=True)
+         if r.returncode == 0:
+             break
+diff --git a/tools/lift/lift32.py b/tools/lift/lift32.py
+index 0e34b6c..3a9768c 100644
+--- a/tools/lift/lift32.py
++++ b/tools/lift/lift32.py
+@@ -113,7 +113,7 @@ FLAG_KIND = {
+     'cmp': 'FK_CMP', 'sub': 'FK_CMP', 'dec': 'FK_DEC',
+     'add': 'FK_ADD', 'inc': 'FK_INC',
+     'and': 'FK_TEST', 'or': 'FK_TEST', 'xor': 'FK_TEST', 'test': 'FK_TEST',
+-    'bt': 'FK_BT', 'bts': 'FK_BT', 'btr': 'FK_BT', 'btc': 'FK_BT', 'fcom': 'FK_FCOM',
++    'bt': 'FK_BT', 'bts': 'FK_BT', 'btr': 'FK_BT', 'btc': 'FK_BT', 'fcom': 'FK_FCOM', 'fcomi': 'FK_FCOMI',
+     'eflags': 'FK_EFLAGS',
+ }
+ 
+@@ -698,7 +698,7 @@ class Lifter:
+             if cc:
+                 return f"/* {setter} result */ recomp_cond(_flag_k, {ops}, {cc})"
+             return f"/* {setter}: unmapped {mnem} */ 0"
+-        elif setter == 'fcom':
++        elif setter in ('fcom', 'fcomi'):
+             # fcom/fcomp + fnstsw + sahf loads C0->CF and C3->ZF, so MSVC tests the
+             # FPU comparison with the UNSIGNED jccs. `ops` is the -1/0/1 result.
+             fpu_cond = {
+@@ -706,7 +706,21 @@ class Lifter:
+                 'jl': '<', 'jle': '<=', 'jg': '>', 'jge': '>=',
+                 'je': '==', 'jz': '==', 'jne': '!=', 'jnz': '!=',
+             }
+-            op = fpu_cond.get(jcc_mnemonic.replace('set', 'j').replace('cmov', 'j'))
++            j = jcc_mnemonic.replace('set', 'j').replace('cmov', 'j')
++            # Unordered (a NaN, FPU_CMP == 2) sets ZF, PF and CF together, both
++            # for fcomi and for fcom + fnstsw + sahf: jp/jnp is MSVC's NaN test,
++            # and the unsigned jccs must see CF=ZF=1 rather than "greater".
++            unordered = {
++                'jp': f"({ops} == 2)", 'jpe': f"({ops} == 2)",
++                'jnp': f"({ops} != 2)", 'jpo': f"({ops} != 2)",
++                'jb': f"({ops} < 0 || {ops} == 2)", 'jbe': f"({ops} <= 0 || {ops} == 2)",
++                'je': f"({ops} == 0 || {ops} == 2)", 'jz': f"({ops} == 0 || {ops} == 2)",
++                'ja': f"({ops} == 1)", 'jae': f"({ops} == 0 || {ops} == 1)",
++                'jne': f"({ops} == -1 || {ops} == 1)", 'jnz': f"({ops} == -1 || {ops} == 1)",
++            }
++            if j in unordered:
++                return unordered[j]
++            op = fpu_cond.get(j)
+             if op:
+                 return f"({ops} {op} 0)"
+             return f"/* fcom: unmapped {jcc_mnemonic} */ ({ops} != 0)"
+@@ -1703,14 +1717,24 @@ class Lifter:
+         # compare never ran (so _fpu_cmp kept its last value) and its two pops
+         # never happened, leaking two x87 slots per call. The Movies has 3,244
+         # of them; its audio code read every position/length ratio as 1.0.
+-        elif m in ('fcomip', 'fucomip', 'fcompp', 'fucompp'):
+-            lines.append(f"_fpu_cmp = FPU_CMP(_st[0], _st[1]); {comment}")
++        # fcomi/fucomi (P6+) compare ST(0) with ST(i) straight into ZF/PF/CF;
++        # the -p forms then pop. Capstone spells the popping ones fcompi and
++        # fucompi, so only the Intel spellings were matched and every Capstone
++        # site lifted to RECOMP_UNIMPL (3,835 in Don't Starve). The operand
++        # matters too: `fucompi st(3)` compares with ST(3), not ST(1).
++        elif m in ('fcomi', 'fucomi', 'fcomip', 'fucomip', 'fcompi', 'fucompi', 'fcompp', 'fucompp'):
++            src = self._fmt_fpu_src(ops) if ops and m not in ('fcompp', 'fucompp') else "_st[1]"
++            lines.append(f"_fpu_cmp = FPU_CMP(_st[0], {src}); {comment}")
+             if m in ('fcompp', 'fucompp'):
+                 lines.append(f"fp_pop(); fp_pop();")
+-            else:
++            elif m not in ('fcomi', 'fucomi'):
+                 lines.append(f"fp_pop();")
+             lines.append("_flag_a = (uint32_t)_fpu_cmp; _flag_b = 0;")
+-            self._flag_state = ('fcom', '_fpu_cmp')
++            if m in ('fcompp', 'fucompp'):
++                self._flag_state = ('fcom', '_fpu_cmp')
++            else:   # the fcomi forms write EFLAGS themselves, CF included
++                lines.append("_cf = (_fpu_cmp < 0 || _fpu_cmp == 2);")
++                self._flag_state = ('fcomi', '_fpu_cmp')
+             self._flag_seq += 1
+ 
+         elif m in ('fcom', 'fcomp', 'fucom', 'fucomp'):
+-- 
+2.43.0
+

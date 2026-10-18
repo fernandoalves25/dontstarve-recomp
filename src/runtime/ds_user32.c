@@ -17,8 +17,6 @@
 #include <strings.h>
 #include "ds_hle.h"
 
-#define DS_SCREEN_W 640
-#define DS_SCREEN_H 480
 #define DS_SCREEN_BPP 32
 #define DS_SCREEN_HZ 60
 

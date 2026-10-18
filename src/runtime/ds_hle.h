@@ -21,6 +21,10 @@
 #include <stddef.h>
 #include "recomp_types.h"   /* g_eax, g_esp, MEM32, ADDR, recomp_func_t, dispatch */
 
+/* the one screen: the R36S panel (window client rect, EGL surface) */
+#define DS_SCREEN_W 640
+#define DS_SCREEN_H 480
+
 /* ---- stdcall argument access (arena-aware) ---- */
 #define A32(i)   ((uint32_t)MEM32(g_esp + 4u + 4u * (uint32_t)(i)))
 #define APTR(i)  ((void *)(uintptr_t)ADDR(A32(i)))   /* host pointer to the guest buffer */
@@ -77,5 +81,7 @@ extern const ds_shim ds_user32[];   /* USER32 + GDI32 (ds_user32.c) */
 extern const ds_shim ds_file[];     /* kernel32 file I/O (ds_file.c) */
 extern const ds_shim ds_net[];      /* offline Winsock (ds_net.c) */
 extern const ds_shim ds_thread[];   /* threads + waitable objects (ds_thread.c) */
+extern const ds_shim ds_input[];    /* XInput + DirectInput8 (ds_input.c) */
+extern const ds_shim ds_gles[];     /* ANGLE libEGL/libGLESv2 -> host EGL/GLES2 (ds_gles.c) */
 
 #endif /* DS_HLE_H */

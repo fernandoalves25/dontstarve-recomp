@@ -36,7 +36,7 @@ descrito em "Deltas vs NFSU2" abaixo.
 |---|---|---|
 | **CRT / C++ runtime** | MSVCR90 (182), MSVCP90 (113) | `win32hle`/`recomp32` cobrem a superfície comum; lacunas viram stub e são preenchidas iterativamente. Maior superfície única (295). |
 | **Win32 core** | KERNEL32 (75), USER32 (44), GDI32 (9), ADVAPI32 (3), SHELL32 (5), ole32 (6), OLEAUT32 (3), WINMM (2) | `win32hle` reaproveitado do pcrecomp/NFSU2. Janela/superfície criada aqui (ver gráficos). |
-| **Gráficos** ⭐ | libGLESv2 (76), libEGL (9) | **Ponte fina GLES2/EGL → nativo (Mali/gl4es).** Passa quase direto; shaders GLSL ES compilam direto. **Sem MojoShader, sem D3D9.** |
+| **Gráficos** ⭐ | libGLESv2 (76), libEGL (9) | **Ponte fina GLES2/EGL → nativo (Mali/gl4es), feita em `ds_gles.c`.** Passa quase direto; shaders GLSL ES compilam direto. **Sem MojoShader, sem D3D9.** |
 | **Áudio** ⚠ | fmodex (21), fmod_event (24) | **Peça custom mais pesada do DS.** FMOD Ex 4.44 não tem build ARM64. Implementar o subconjunto da API FMOD Ex + Event que o DS usa sobre backend nativo (SDL_audio/miniaudio), decodificando bancos FSB5/Vorbis. Permitir bring-up **mudo** primeiro. |
 | **Input** | DINPUT8 (1), XINPUT1_3 (5) | Ponte para SDL2 GameController / evdev. Pequeno. |
 | **Rede (single-player)** | WSOCK32 (29), WLDAP32 (16), WS2_32 (2) | Stub para single-player (offline). |

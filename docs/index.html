@@ -88,7 +88,7 @@ const T = {
   title:"Don't Starve — Native ARM64 recompilation for R36S",
   sub:"Static recompilation of the Windows EXE (x86-32) into native C99 via pcrecomp — no box64, no runtime emulation. Keeps all DLCs, mods, the PT-BR translation and the PC UI.",
   bRan:"Executed at runtime", bFns:"Functions lifted", bFail:"Lift failures", bImp:"Imports resolved", bPhase:"Phase",
-  phase:"Window done, EGL/GLES2 next",
+  phase:"GLES2 up, FMOD next",
   hLift:"How much actually runs — by module",
   lgLift:"ran at runtime", lgPrune:"lifted, not run yet", lgCell:"each cell ≈ 16 functions — lifting is the easy part; running is the real progress",
   fns:"fns", pruned:"pruned",
@@ -106,14 +106,14 @@ const T = {
    ["Audio (FMOD Ex shim)","FSB5/Vorbis banks"],
    ["PortMaster package + FPS","vs the ~20–22 FPS box64 ceiling"]],
   hHelp:"Where the community can help",
-  help:"<b>Current wall: <code>libEGL.dll#2</code> (<code>eglGetDisplay</code>), the first ANGLE call.</b> The port now lifts the game's DRM-free standalone build (<code>dontstarve.exe</code>, 16,146 functions, 0 lift failures) instead of the Steam one, which won't start without a running Steam client. Execution reaches 1,273 functions (729 in the game exe). The game writes its own <code>log.txt</code>, probes its DLC/patch folders and settings, registers its <code>opengles2.0</code> window class and creates its window. The guest <code>WndProc</code> handles the creation messages, then the game calls <code>eglGetDisplay</code>.<br><br>The runtime now has USER32/GDI32 (a headless 640×480 window), file I/O mapped onto the game and save folders, real threads with waitable objects, and an offline Winsock. Help wanted: the ANGLE <code>libEGL</code>/<code>libGLESv2</code> bridge (by ordinal: 9 EGL, 76 GLES2) to native GLES2 on the Mali GPU over an SDL2/KMSDRM surface; then input (XINPUT/DINPUT8 to SDL2) and the FMOD Ex shim.",
+  help:"<b>Current wall: <code>FMOD_EventSystem_Create</code>, the first audio call.</b> The port lifts the game's DRM-free standalone build (<code>dontstarve.exe</code>, 16,146 functions, 0 lift failures). Execution reaches 1,335 functions (787 in the game exe). The game creates its window, brings up EGL + GLES2 for real through the new ANGLE bridge (9 EGL + 76 GLES2 imports by ordinal, onto native EGL/GLES2; headless pbuffer for now), queries its texture formats, enumerates input devices and reaches <code>DoGameSpecificInitialize()</code>. Lifter patch 0016 adds the x87 <code>fcomi</code>/<code>fucomi</code> compares (3,835 sites); pcrecomp's difftest matches hardware on 263/263 cases.<br><br>Help wanted: the FMOD Ex + FMOD Event shim (silent first, then SDL audio with FSB banks), and SDL2/KMSDRM behind the window, the EGL surface and the input layer for the R36S.",
   legal:"<b>Legal:</b> this repository contains only original tooling and runtime — <b>no game binaries, assets or code</b>. You need your own legal copy of Don't Starve. Lifted C and all game material stay local (git-ignored). Don't Starve © Klei Entertainment; not affiliated with Klei. · Tooling under the MIT license."
  },
  pt:{
   title:"Don't Starve — Recompilação nativa ARM64 para R36S",
   sub:"Recompilação estática do EXE Windows (x86-32) para C99 nativo via pcrecomp — sem box64, sem emulação em runtime. Preserva todas as DLCs, mods, a tradução PT-BR e a UI de PC.",
   bRan:"Executadas em runtime", bFns:"Funções liftadas", bFail:"Falhas de lift", bImp:"Imports resolvidos", bPhase:"Fase",
-  phase:"Janela pronta, EGL/GLES2 a seguir",
+  phase:"GLES2 ok, FMOD a seguir",
   hLift:"Quanto realmente roda — por módulo",
   lgLift:"rodou em runtime", lgPrune:"liftada, ainda não rodou", lgCell:"cada célula ≈ 16 funções — liftar é a parte fácil; rodar é o progresso real",
   fns:"fns", pruned:"podadas",
@@ -131,7 +131,7 @@ const T = {
    ["Áudio (shim do FMOD Ex)","banks FSB5/Vorbis"],
    ["Pacote PortMaster + FPS","vs o teto de ~20–22 FPS do box64"]],
   hHelp:"Onde a comunidade pode ajudar",
-  help:"<b>Parede atual: <code>libEGL.dll#2</code> (<code>eglGetDisplay</code>), a primeira chamada ao ANGLE.</b> O port agora lifta o build standalone DRM-free do jogo (<code>dontstarve.exe</code>, 16.146 funções, 0 falhas de lift) em vez do build Steam, que não inicia sem o cliente da Steam rodando. A execução chega a 1.273 funções (729 no exe do jogo). O jogo escreve o próprio <code>log.txt</code>, procura as pastas de DLC/patch e as configurações, registra a classe de janela <code>opengles2.0</code> e cria a janela. O <code>WndProc</code> do jogo trata as mensagens de criação, e então o jogo chama <code>eglGetDisplay</code>.<br><br>O runtime agora tem USER32/GDI32 (uma janela headless de 640×480), I/O de arquivos mapeado para as pastas do jogo e dos saves, threads reais com objetos de espera e um Winsock offline. Procura-se ajuda: a ponte ANGLE <code>libEGL</code>/<code>libGLESv2</code> (por ordinal: 9 EGL, 76 GLES2) para GLES2 nativo na GPU Mali sobre uma superfície SDL2/KMSDRM; depois input (XINPUT/DINPUT8 para SDL2) e o shim do FMOD Ex.",
+  help:"<b>Parede atual: <code>FMOD_EventSystem_Create</code>, a primeira chamada de áudio.</b> O port lifta o build standalone DRM-free do jogo (<code>dontstarve.exe</code>, 16.146 funções, 0 falhas de lift). A execução chega a 1.335 funções (787 no exe do jogo). O jogo cria a janela, sobe EGL + GLES2 de verdade pela nova ponte do ANGLE (9 imports EGL + 76 GLES2 por ordinal, para EGL/GLES2 nativo; pbuffer headless por enquanto), consulta os formatos de textura, enumera os dispositivos de input e chega ao <code>DoGameSpecificInitialize()</code>. O patch 0016 do lifter adiciona as comparações x87 <code>fcomi</code>/<code>fucomi</code> (3.835 pontos); o difftest do pcrecomp bate com o hardware em 263/263 casos.<br><br>Procura-se ajuda: o shim do FMOD Ex + FMOD Event (primeiro mudo, depois áudio SDL com bancos FSB), e SDL2/KMSDRM por trás da janela, da superfície EGL e da camada de input para o R36S.",
   legal:"<b>Legal:</b> este repositório contém apenas ferramentas e runtime originais — <b>nenhum binário, asset ou código do jogo</b>. Você precisa da sua própria cópia legítima de Don't Starve. O C liftado e todo material do jogo ficam locais (fora do git). Don't Starve © Klei Entertainment; sem afiliação com a Klei. · Ferramentas sob licença MIT."
  }
 };
