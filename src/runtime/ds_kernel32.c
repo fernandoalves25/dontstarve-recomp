@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdint.h>
+#include <pthread.h>
 #include "ds_hle.h"
 
 enum { HK_HEAP = 1, HK_MODULE, HK_FILE, HK_MUTEX, HK_EVENT, HK_THREAD };
@@ -104,20 +106,60 @@ static void sh_VirtualAlloc(void) {
 static void sh_VirtualFree(void)      { RET(1, 3); }
 static void sh_VirtualProtect(void)   { RET(1, 4); }
 
-/* ===================== TLS (process-global for now) ===================== */
-#define NTLS 1088
-static uint32_t g_tls[NTLS]; static int g_tls_n;
-static void sh_TlsAlloc(void)    { RET(g_tls_n < NTLS ? (uint32_t)g_tls_n++ : 0xFFFFFFFFu, 0); }
+/* ===================== TLS / FLS (real per-thread storage) =====================
+ * Index allocation is process-global; the VALUES are per host-thread (__thread),
+ * so each guest thread (= one host pthread) gets its own slots, as Win32 TLS
+ * guarantees. The CRT's _tiddata is lifted guest code; it only needs these. */
+#define NSLOT 1088
+static int g_tls_next, g_fls_next;
+static __thread uint32_t t_tls[NSLOT];
+static __thread uint32_t t_fls[NSLOT];
+static void sh_TlsAlloc(void)    { RET(g_tls_next < NSLOT ? (uint32_t)g_tls_next++ : 0xFFFFFFFFu, 0); }
 static void sh_TlsFree(void)     { RET(1, 1); }
-static void sh_TlsSetValue(void) { uint32_t i = A32(0); if (i < NTLS) g_tls[i] = A32(1); RET(1, 2); }
-static void sh_TlsGetValue(void) { uint32_t i = A32(0); RET(i < NTLS ? g_tls[i] : 0, 1); }
+static void sh_TlsSetValue(void) { uint32_t i = A32(0); if (i < NSLOT) t_tls[i] = A32(1); RET(1, 2); }
+static void sh_TlsGetValue(void) { uint32_t i = A32(0); RET(i < NSLOT ? t_tls[i] : 0, 1); }
 
-/* ===================== critical sections (no-op, single machine lock) ===================== */
-static void sh_InitializeCriticalSection(void)        { RETV(1); }
-static void sh_InitializeCriticalSectionAndSpinCount(void) { RET(1, 2); }
-static void sh_DeleteCriticalSection(void)            { RETV(1); }
-static void sh_EnterCriticalSection(void)             { RETV(1); }
-static void sh_LeaveCriticalSection(void)             { RETV(1); }
+/* ===================== critical sections =====================
+ * The CRT initialises a CS struct in guest memory and then reads its fields, so
+ * Initialize must leave a valid struct (no-op => garbage deref). Real mutual
+ * exclusion is backed by a host recursive pthread_mutex, keyed by the guest CS
+ * VA (so it ports to aarch64 and is correct once WorldSim/HTTP become threads).
+ * RTL_CRITICAL_SECTION (x86): +0 DebugInfo, +4 LockCount, +8 RecursionCount,
+ * +12 OwningThread, +16 LockSemaphore, +20 SpinCount. */
+#define MAX_CS 4096
+static struct { uint32_t va; pthread_mutex_t m; } g_cs[MAX_CS];
+static int g_cs_n;
+static pthread_mutex_t g_cs_tab_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t *cs_mutex(uint32_t va) {
+    pthread_mutex_lock(&g_cs_tab_lock);
+    for (int i = 0; i < g_cs_n; i++)
+        if (g_cs[i].va == va) { pthread_mutex_t *m = &g_cs[i].m; pthread_mutex_unlock(&g_cs_tab_lock); return m; }
+    pthread_mutex_t *m = NULL;
+    if (g_cs_n < MAX_CS) {
+        int i = g_cs_n++;
+        g_cs[i].va = va;
+        pthread_mutexattr_t a; pthread_mutexattr_init(&a);
+        pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&g_cs[i].m, &a);
+        m = &g_cs[i].m;
+    }
+    pthread_mutex_unlock(&g_cs_tab_lock);
+    return m;
+}
+static void cs_init_struct(uint32_t va) {
+    MEM32(va + 0) = 0;            /* DebugInfo = NULL */
+    MEM32(va + 4) = 0xFFFFFFFFu;  /* LockCount = -1 (unlocked) */
+    MEM32(va + 8) = 0;            /* RecursionCount */
+    MEM32(va + 12) = 0;           /* OwningThread */
+    MEM32(va + 16) = 0;           /* LockSemaphore */
+    MEM32(va + 20) = 0;           /* SpinCount */
+}
+static void sh_InitializeCriticalSection(void)        { uint32_t v = A32(0); cs_init_struct(v); cs_mutex(v); RETV(1); }
+static void sh_InitializeCriticalSectionAndSpinCount(void) { uint32_t v = A32(0); cs_init_struct(v); cs_mutex(v); RET(1, 2); }
+static void sh_DeleteCriticalSection(void)            { RETV(1); }  /* keep the host mutex alive */
+static void sh_EnterCriticalSection(void)             { pthread_mutex_t *m = cs_mutex(A32(0)); if (m) pthread_mutex_lock(m); RETV(1); }
+static void sh_LeaveCriticalSection(void)             { pthread_mutex_t *m = cs_mutex(A32(0)); if (m) pthread_mutex_unlock(m); RETV(1); }
+static void sh_TryEnterCriticalSection(void)          { pthread_mutex_t *m = cs_mutex(A32(0)); RET(m && pthread_mutex_trylock(m) == 0 ? 1 : 0, 1); }
 
 /* ===================== time ===================== */
 static void sh_GetTickCount(void) {
@@ -316,9 +358,9 @@ static void sh_GetSystemInfo(void) {   /* fill SYSTEM_INFO (minimal) */
     MEM32(p + 28) = 0x1000;        /* dwAllocationGranularity (approx) */
     RETV(1);
 }
-static void sh_FlsAlloc(void)    { RET(g_tls_n < NTLS ? (uint32_t)g_tls_n++ : 0xFFFFFFFFu, 1); }
-static void sh_FlsSetValue(void) { uint32_t i = A32(0); if (i < NTLS) g_tls[i] = A32(1); RET(1, 2); }
-static void sh_FlsGetValue(void) { uint32_t i = A32(0); RET(i < NTLS ? g_tls[i] : 0, 1); }
+static void sh_FlsAlloc(void)    { RET(g_fls_next < NSLOT ? (uint32_t)g_fls_next++ : 0xFFFFFFFFu, 1); }
+static void sh_FlsSetValue(void) { uint32_t i = A32(0); if (i < NSLOT) t_fls[i] = A32(1); RET(1, 2); }
+static void sh_FlsGetValue(void) { uint32_t i = A32(0); RET(i < NSLOT ? t_fls[i] : 0, 1); }
 static void sh_FlsFree(void)     { RET(1, 1); }
 static void sh_Sleep(void)       { RETV(1); }
 static void sh_RtlUnwind(void)   { RETV(4); }   /* SEH unwind: no-op for now */
@@ -368,6 +410,7 @@ const ds_shim ds_kernel32[] = {
     { "DeleteCriticalSection", sh_DeleteCriticalSection },
     { "EnterCriticalSection", sh_EnterCriticalSection },
     { "LeaveCriticalSection", sh_LeaveCriticalSection },
+    { "TryEnterCriticalSection", sh_TryEnterCriticalSection },
     { "GetTickCount", sh_GetTickCount },
     { "GetSystemTimeAsFileTime", sh_GetSystemTimeAsFileTime },
     { "QueryPerformanceCounter", sh_QueryPerformanceCounter },
