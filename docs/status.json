@@ -1,0 +1,25 @@
+{
+  "per_cell": 16,
+  "modules": [
+    {"name": "dontstarve_steam.exe", "kind_en": "x86-32 EXE (VC9)", "kind_pt": "EXE x86-32 (VC9)", "lifted": 17033, "pruned": 0},
+    {"name": "msvcr90.dll", "kind_en": "VC9 CRT (lifted)", "kind_pt": "CRT VC9 (liftado)", "lifted": 5300, "pruned": 231},
+    {"name": "msvcp90.dll", "kind_en": "VC9 STL (lifted)", "kind_pt": "STL VC9 (liftado)", "lifted": 3407, "pruned": 152}
+  ],
+  "lift_failures": 0,
+  "imports_resolved": 955,
+  "imports_total": 955,
+  "phase_en": "CRT bring-up",
+  "phase_pt": "bring-up do CRT",
+  "milestones": [
+    {"id": "M0", "state": "ok",   "en": "Toolchain",      "pt": "Toolchain"},
+    {"id": "M1", "state": "ok",   "en": "Catalog",        "pt": "Catálogo"},
+    {"id": "M2", "state": "ok",   "en": "Lift to C",      "pt": "Lift p/ C"},
+    {"id": "M3", "state": "ok",   "en": "Compile+link",   "pt": "Compila+linka"},
+    {"id": "M4", "state": "ok",   "en": "Host+IAT",       "pt": "Host+IAT"},
+    {"id": "M5", "state": "work", "en": "CRT init",       "pt": "Init do CRT"},
+    {"id": "M6", "state": "todo", "en": "Main menu",      "pt": "Menu"},
+    {"id": "M7", "state": "todo", "en": "Stability",      "pt": "Estabilidade"},
+    {"id": "M8", "state": "todo", "en": "Audio",          "pt": "Áudio"},
+    {"id": "M9", "state": "todo", "en": "PortMaster+FPS", "pt": "PortMaster+FPS"}
+  ]
+}

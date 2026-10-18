@@ -213,6 +213,34 @@ static void ds_eh_prolog(void) {
     g_eax = 0;
 }
 
+/* Native _SEH_prolog4 (msvcr90 0x7858CF00): push <size>; push <scopetable>;
+ * call _SEH_prolog4. Builds the MSVC /GS EH4 frame the caller expects, in the
+ * recomp convention (no return-address/esp surgery). On entry g_esp ->
+ * [ret][scopetable][size]; ebp = &size-slot. */
+static void ds_seh_prolog4(void) {
+    uint32_t P = g_esp;
+    uint32_t scopetable = MEM32(P + 4);
+    uint32_t size       = MEM32(P + 8);
+    uint32_t oldfs      = MEM32(g_fs_base + 0);
+    uint32_t cookie     = MEM32(0x785BA2A8u);      /* __security_cookie (guest VA) */
+    uint32_t ebp        = P + 8;
+    MEM32(P + 8) = g_ebp;                           /* [ebp]     = saved ebp */
+    MEM32(P + 4) = 0xFFFFFFFEu;                     /* [ebp-4]   = trylevel -2 */
+    MEM32(P)     = scopetable ^ cookie;             /* [ebp-8]   = scopetable ^ cookie */
+    MEM32(P - 4) = 0x7858CF5Eu;                     /* [ebp-0xC] = __except_handler4 */
+    MEM32(P - 8) = oldfs;                           /* [ebp-0x10]= EXCEPTION_REGISTRATION.Next */
+    MEM32(g_fs_base + 0) = P - 8;                   /* fs:[0] = &record */
+    uint32_t sp = P - 8 - size;                     /* after sub esp, size */
+    MEM32(sp - 4)  = g_ebx;
+    MEM32(sp - 8)  = g_esi;
+    MEM32(sp - 12) = g_edi;
+    MEM32(sp - 16) = cookie ^ ebp;                  /* GS stack cookie */
+    MEM32(P - 0x10) = sp - 16;                      /* [ebp-0x18] = esp snapshot */
+    g_ebp = ebp;
+    g_esp = sp - 16;
+    g_eax = 0;
+}
+
 /* ============================================================ shim registry */
 #define SHIM_BASE 0x7F000000u
 #define SHIM_STEP 16u
@@ -474,7 +502,8 @@ int main(int argc, char **argv) {
     int have_p = (ds_pe_load("work/msvcp90.dll", &img_p) == 0); if (have_p) g_msvcp_img = &img_p;
 
     ds_host_init();
-    ds_register_manual(0x7857DF6Cu, ds_eh_prolog);   /* msvcr90 __EH_prolog */
+    ds_register_manual(0x7857DF6Cu, ds_eh_prolog);     /* msvcr90 __EH_prolog */
+    ds_register_manual(0x7858CF00u, ds_seh_prolog4);   /* msvcr90 _SEH_prolog4 */
     fprintf(stderr, "[ds] registered %d HLE shims; lifted DLLs: msvcr90=%d msvcp90=%d\n",
             g_shim_n, have_r, have_p);
 

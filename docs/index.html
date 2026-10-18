@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Don't Starve — Native ARM64 Recompilation (R36S)</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3; --muted:#8b949e;
+    --green:#3fb950; --amber:#d29922; --blue:#58a6ff; --grid:#1f6f34; --pruned:#484f58;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  a{color:var(--blue);text-decoration:none} a:hover{text-decoration:underline}
+  .wrap{max-width:1040px;margin:0 auto;padding:24px 16px 60px}
+  .top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--muted);margin:0 0 20px;max-width:760px}
+  .lang{display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;flex-shrink:0}
+  .lang button{background:var(--panel);color:var(--muted);border:0;padding:6px 12px;font:600 12px inherit;cursor:pointer}
+  .lang button.on{background:#21262d;color:var(--fg)}
+  .badges{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 24px}
+  .badge{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:8px 12px;display:flex;gap:8px;align-items:center}
+  .badge b{font-size:16px} .badge .k{color:var(--muted);font-size:12px}
+  .pill{border-radius:20px;padding:2px 10px;font-size:12px;font-weight:600;white-space:nowrap}
+  .pill.ok{background:rgba(63,185,80,.15);color:var(--green)}
+  .pill.work{background:rgba(210,153,34,.15);color:var(--amber)}
+  .pill.todo{background:rgba(139,148,158,.12);color:var(--muted)}
+  h2{font-size:14px;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);
+     border-bottom:1px solid var(--border);padding-bottom:8px;margin:34px 0 16px}
+  .tmwrap{display:flex;gap:10px;flex-wrap:wrap}
+  .mod{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px;flex:1 1 220px;min-width:0}
+  .mod h3{margin:0 0 2px;font-size:14px;word-break:break-all} .mod .c{color:var(--muted);font-size:12px;margin-bottom:8px}
+  .cells{display:grid;grid-template-columns:repeat(auto-fill,10px);gap:2px}
+  .cell{width:10px;height:10px;border-radius:2px;background:var(--grid)}
+  .cell.x{background:var(--pruned)}
+  .legend{display:flex;flex-wrap:wrap;gap:16px;color:var(--muted);font-size:12px;margin-top:10px}
+  .sw{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:5px}
+  .mile{display:flex;flex-direction:column;gap:6px}
+  .step{display:flex;gap:12px;background:var(--panel);border:1px solid var(--border);border-left-width:3px;border-radius:6px;padding:10px 12px}
+  .step.ok{border-left-color:var(--green)} .step.work{border-left-color:var(--amber)} .step.todo{opacity:.7}
+  .step .m{font-weight:700;min-width:34px;color:var(--muted)}
+  .step .t{flex:1;min-width:0} .step .t b{display:block} .step .t span{color:var(--muted);font-size:13px}
+  .note{background:var(--panel);border:1px solid rgba(210,153,34,.4);border-radius:8px;padding:16px}
+  code{background:#010409;border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:12.5px;word-break:break-word}
+  .foot{color:var(--muted);font-size:12.5px;margin-top:40px;border-top:1px solid var(--border);padding-top:16px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div>
+      <h1 data-i="title"></h1>
+      <p class="sub" data-i="sub"></p>
+    </div>
+    <div class="lang"><button data-l="en">EN</button><button data-l="pt">PT</button></div>
+  </div>
+
+  <div class="badges">
+    <div class="badge"><span class="k" data-i="bFns"></span><b id="b-fns"></b></div>
+    <div class="badge"><span class="k" data-i="bFail"></span><b style="color:var(--green)">0</b></div>
+    <div class="badge"><span class="k" data-i="bImp"></span><b>955 / 955</b></div>
+    <div class="badge"><span class="k" data-i="bPhase"></span><span class="pill work" data-i="phase"></span></div>
+  </div>
+
+  <h2 data-i="hLift"></h2>
+  <div class="tmwrap" id="tm"></div>
+  <div class="legend">
+    <span><span class="sw" style="background:var(--grid)"></span><span data-i="lgLift"></span></span>
+    <span><span class="sw" style="background:var(--pruned)"></span><span data-i="lgPrune"></span></span>
+    <span data-i="lgCell"></span>
+  </div>
+
+  <h2 data-i="hMile"></h2>
+  <div class="mile" id="mile"></div>
+
+  <h2 data-i="hHelp"></h2>
+  <div class="note" data-i="help" data-html></div>
+
+  <div class="foot" data-i="legal" data-html></div>
+</div>
+
+<script>
+const T = {
+ en:{
+  title:"Don't Starve — Native ARM64 recompilation for R36S",
+  sub:"Static recompilation of the Windows EXE (x86-32) into native C99 via pcrecomp — no box64, no runtime emulation. Keeps all DLCs, mods, the PT-BR translation and the PC UI.",
+  bFns:"Functions lifted", bFail:"Lift failures", bImp:"Imports resolved", bPhase:"Phase",
+  phase:"CRT bring-up",
+  hLift:"Lift coverage — by module",
+  lgLift:"lifted (0 failures)", lgPrune:"pruned (data in .text, never called)", lgCell:"each cell ≈ a block of functions",
+  fns:"fns", pruned:"pruned",
+  hMile:"Milestone progress",
+  st:{ok:"done",work:"in progress",todo:"to do"},
+  miles:[
+   ["Input decision + toolchain","x86-32 PE EXE (not ELF); patched pcrecomp"],
+   ["Function catalog","17,033 functions (disasm32, 6 discovery rounds)"],
+   ["Lift to C99","4.2M lines, 0 failures"],
+   ["Compiles + links","x86-64 host; exe + 2 lifted CRT DLLs in one binary"],
+   ["Arena host + IAT + DllMain","2 GB arena; 955 imports resolved; CRT DllMain runs"],
+   ["CRT initialization","return address leaks into esp during C++ static init (current wall)"],
+   ["Native main menu","first playable milestone"],
+   ["Stability","close the ICALL loop enough to play"],
+   ["Audio (FMOD Ex shim)","FSB5/Vorbis banks"],
+   ["PortMaster package + FPS","vs the ~20–22 FPS box64 ceiling"]],
+  hHelp:"Where the community can help",
+  help:"<b>Current wall: bring-up of the recompiled VC9 CRT.</b> The recompiled entry runs the CRT startup, but during C++ static initialization a <b>return-address sentinel leaks into <code>esp</code>/<code>ebp</code></b> inside CRT functions that do raw stack surgery, incompatible with the recomp call/ret model. Native HLE of <code>__EH_prolog</code> and <code>_SEH_prolog4</code> is done, but neither is the leak source. Debug tooling: a <b>gdb-free backtrace</b> in the crash handler (the recomp uses real C calls, so the host backtrace <i>is</i> the guest call chain).<br><br>Current backtrace: <code>DllMain → sub_78542B94 → sub_78562B86 → _setmbcp → crash (invalid esp)</code>. Wanted: the function that writes a stack value (the return address) back into <code>esp</code>/<code>ebp</code>.",
+  legal:"<b>Legal:</b> this repository contains only original tooling and runtime — <b>no game binaries, assets or code</b>. You need your own legal copy of Don't Starve. Lifted C and all game material stay local (git-ignored). Don't Starve © Klei Entertainment; not affiliated with Klei. · Tooling under the MIT license."
+ },
+ pt:{
+  title:"Don't Starve — Recompilação nativa ARM64 para R36S",
+  sub:"Recompilação estática do EXE Windows (x86-32) para C99 nativo via pcrecomp — sem box64, sem emulação em runtime. Preserva todas as DLCs, mods, a tradução PT-BR e a UI de PC.",
+  bFns:"Funções liftadas", bFail:"Falhas de lift", bImp:"Imports resolvidos", bPhase:"Fase",
+  phase:"Bring-up do CRT",
+  hLift:"Cobertura de lift — por módulo",
+  lgLift:"liftado (0 falhas)", lgPrune:"podado (dados no .text, nunca chamado)", lgCell:"cada célula ≈ um bloco de funções",
+  fns:"fns", pruned:"podadas",
+  hMile:"Progresso dos marcos",
+  st:{ok:"feito",work:"em progresso",todo:"a fazer"},
+  miles:[
+   ["Decisão de input + toolchain","EXE x86-32 PE (não ELF); pcrecomp patchado"],
+   ["Catálogo de funções","17.033 funções (disasm32, 6 rounds de descoberta)"],
+   ["Lift para C99","4,2M linhas, 0 falhas"],
+   ["Compila + linka","host x86-64; exe + 2 DLLs do CRT liftadas num binário"],
+   ["Host arena + IAT + DllMain","arena de 2 GB; 955 imports resolvidos; DllMain do CRT roda"],
+   ["Inicialização do CRT","endereço de retorno vaza pro esp no static-init C++ (parede atual)"],
+   ["Menu principal nativo","primeiro marco jogável"],
+   ["Estabilidade","fechar o loop de ICALL o bastante pra jogar"],
+   ["Áudio (shim do FMOD Ex)","banks FSB5/Vorbis"],
+   ["Pacote PortMaster + FPS","vs o teto de ~20–22 FPS do box64"]],
+  hHelp:"Onde a comunidade pode ajudar",
+  help:"<b>Parede atual: bring-up do CRT VC9 recompilado.</b> O entry recompilado roda o startup do CRT, mas durante a inicialização estática C++ um <b>sentinela de endereço de retorno vaza para <code>esp</code>/<code>ebp</code></b> dentro de funções do CRT que fazem cirurgia crua na pilha, incompatível com o modelo de call/ret do recomp. Já temos HLE nativo de <code>__EH_prolog</code> e <code>_SEH_prolog4</code>, mas nenhum dos dois é a fonte do vazamento. Ferramenta de debug: um <b>backtrace sem gdb</b> no crash handler (o recomp usa calls C reais, então o backtrace do host <i>é</i> a cadeia de chamadas do guest).<br><br>Backtrace atual: <code>DllMain → sub_78542B94 → sub_78562B86 → _setmbcp → crash (esp inválido)</code>. Procura-se: a função que escreve um valor de pilha (o endereço de retorno) de volta em <code>esp</code>/<code>ebp</code>.",
+  legal:"<b>Legal:</b> este repositório contém apenas ferramentas e runtime originais — <b>nenhum binário, asset ou código do jogo</b>. Você precisa da sua própria cópia legítima de Don't Starve. O C liftado e todo material do jogo ficam locais (fora do git). Don't Starve © Klei Entertainment; sem afiliação com a Klei. · Ferramentas sob licença MIT."
+ }
+};
+
+const MODS = [
+  {name:"dontstarve_steam.exe", kind:{en:"x86-32 EXE (VC9)",pt:"EXE x86-32 (VC9)"}, lifted:17033, pruned:0},
+  {name:"msvcr90.dll", kind:{en:"VC9 CRT (lifted)",pt:"CRT VC9 (liftado)"}, lifted:5300, pruned:231},
+  {name:"msvcp90.dll", kind:{en:"VC9 STL (lifted)",pt:"STL VC9 (liftado)"}, lifted:3407, pruned:152},
+];
+const MSTATE = ["ok","ok","ok","ok","ok","work","todo","todo","todo","todo"];
+const PER = 16; // functions per cell
+
+function render(lang){
+  const t = T[lang];
+  document.documentElement.lang = lang === 'pt' ? 'pt-BR' : 'en';
+  document.querySelectorAll('[data-i]').forEach(el=>{
+    const v = t[el.dataset.i]; if (v === undefined) return;
+    if (el.hasAttribute('data-html')) el.innerHTML = v; else el.textContent = v;
+  });
+  const loc = lang === 'pt' ? 'pt-BR' : 'en-US';
+  document.getElementById('b-fns').textContent = MODS.reduce((s,m)=>s+m.lifted,0).toLocaleString(loc);
+
+  const tm = document.getElementById('tm'); tm.innerHTML = '';
+  MODS.forEach(m=>{
+    const el = document.createElement('div'); el.className = 'mod';
+    const nL = Math.max(1, Math.round(m.lifted/PER)), nP = Math.round(m.pruned/PER);
+    el.innerHTML = `<h3>${m.name}</h3><div class="c">${m.kind[lang]} · ${m.lifted.toLocaleString(loc)} ${t.fns}`
+      + (m.pruned ? ` · ${m.pruned} ${t.pruned}` : ``) + `</div><div class="cells">`
+      + '<span class="cell"></span>'.repeat(nL) + '<span class="cell x"></span>'.repeat(nP) + `</div>`;
+    tm.appendChild(el);
+  });
+
+  const mile = document.getElementById('mile'); mile.innerHTML = '';
+  t.miles.forEach(([title,desc],i)=>{
+    const st = MSTATE[i];
+    const el = document.createElement('div'); el.className = 'step ' + st;
+    el.innerHTML = `<div class="m">M${i}</div><div class="t"><b>${title} <span class="pill ${st}">${t.st[st]}</span></b><span>${desc}</span></div>`;
+    mile.appendChild(el);
+  });
+
+  document.querySelectorAll('.lang button').forEach(b=>b.classList.toggle('on', b.dataset.l === lang));
+  try { localStorage.setItem('ds-lang', lang); } catch(e) {}
+}
+
+let start = 'en';
+try {
+  const saved = localStorage.getItem('ds-lang');
+  if (saved === 'en' || saved === 'pt') start = saved;
+  else if ((navigator.language||'').toLowerCase().startsWith('pt')) start = 'pt';
+} catch(e) {}
+document.querySelectorAll('.lang button').forEach(b=>b.addEventListener('click',()=>render(b.dataset.l)));
+render(start);
+</script>
+</body>
+</html>
