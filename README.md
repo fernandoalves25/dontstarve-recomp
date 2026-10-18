@@ -131,8 +131,8 @@ Help wanted, in order:
   offscreen driver), the aarch64 build in a glibc ≤ 2.30 image for ArkOS, and FPS against box64.
 - **The last Vorbis setups:** 6 of the 20 setup headers (low sample rates, 8–24 kHz) don't match
   any encoder setting tried yet, so those waves stay silent.
-- **Complex FMOD events:** multi-layer events and event parameters (only layer 0 plays; 86 of 160
-  complex events have no sound definition found yet).
+- **Complex FMOD events:** event parameters drive which layer plays (day/night ambience, music
+  intensity); the host plays the first layer of each.
 - **Long play sessions:** days, nights, seasons, saving and loading.
 
 Runtime fixes on the way (useful for anyone using pcrecomp): import-stub names were dangling
@@ -314,8 +314,8 @@ Procura-se ajuda, nesta ordem:
   offscreen do SDL), o build aarch64 numa imagem com glibc ≤ 2.30 para o ArkOS, e FPS comparado ao box64.
 - **Os últimos setups Vorbis:** 6 dos 20 cabeçalhos de setup (taxas baixas, 8–24 kHz) ainda não
   batem com nenhuma configuração do encoder testada, então essas ondas ficam mudas.
-- **Eventos FMOD complexos:** eventos de várias camadas e parâmetros de evento (só a camada 0 toca;
-  86 de 160 eventos complexos ainda sem definição de som encontrada).
+- **Eventos FMOD complexos:** os parâmetros do evento escolhem a camada que toca (ambiente de
+  dia/noite, intensidade da música); o host toca a primeira camada de cada um.
 - **Sessões longas de jogo:** dias, noites, estações, salvar e carregar.
 
 Correções de runtime no caminho (úteis para quem usa o pcrecomp): os nomes dos stubs de import

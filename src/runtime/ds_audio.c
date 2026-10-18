@@ -230,15 +230,22 @@ static void load_fev(const uint8_t *d, size_t n) {
                 e = &g_events[g_nevents++]; memset(e, 0, sizeof *e); e->fev = fi;
                 char path[320]; snprintf(path, sizeof path, "%s/%s", st[sp - 1].path, S[en]); e->path = strdup(path);
                 if (ty == 0x10) { uint16_t di; memcpy(&di, lg + es + 172, 2); if (di < ndefs) e->defs[e->ndefs++] = di; }
-                else for (size_t q = es + 8; q + 6 <= end && e->ndefs < 8; q++)
-                    if (!memcmp(lg + q, "\x01\x00\x01\x00", 4)) { uint16_t di; memcpy(&di, lg + q + 4, 2); if (di < ndefs) e->defs[e->ndefs++] = di; }
+                /* a complex event's layers: u16 flags (2), i16 priority (-1),
+                 * i16 parameter, u16 nsounds, u16 nenvelopes, then the first
+                 * sound instance's u16 sound definition */
+                else for (size_t q = es + 8; q + 12 <= end && e->ndefs < 8; q++) {
+                    const uint8_t *L = lg + q;
+                    if (L[0] != 2 || L[1] || L[2] != 0xFF || L[3] != 0xFF || L[6] < 1 || L[6] > 8 || L[7] || L[8] > 0x20 || L[9]) continue;
+                    uint16_t di; memcpy(&di, L + 10, 2); if (di < ndefs) e->defs[e->ndefs++] = di;
+                }
                 r.p = end + cl;
                 continue;
             }
             sp--;
         }
     }
-    fprintf(stderr, "[audio] %s.fev: %d events, %u sound definitions%s\n", proj, g_nevents - nev0, ndefs, r.bad ? " (tree cut short)" : "");
+    int nodef = 0; for (int i = nev0; i < g_nevents; i++) nodef += !g_events[i].ndefs;
+    fprintf(stderr, "[audio] %s.fev: %d events (%d without a sound), %u sound definitions%s\n", proj, g_nevents - nev0, nodef, ndefs, r.bad ? " (tree cut short)" : "");
     for (int c = 0; c < ncats; c++) free(cats[c]); free(cats); free(S);
 }
 static void load_fevs(void) {

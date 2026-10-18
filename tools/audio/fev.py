@@ -75,26 +75,31 @@ def parse(path, verbose=False):
 
 
 def find_sounddefs(L, S):
-    """Locate the sound definition table: the u32 count right before the first
-    record whose name is a '/...' sound definition path."""
-    first = next(i for i, x in enumerate(S) if x.startswith("/"))
-    pat = struct.pack("<I", first)
-    p = L.rfind(pat)
-    while p > 0:
+    """Locate the sound definition table: a u32 count, then records whose
+    names are '/...' sound definition paths. Its first name is not always the
+    first '/' string, so try every spot and keep the largest table that reads
+    through cleanly."""
+    best = None
+    for p in range(4, len(L) - 8):
+        v = struct.unpack_from("<I", L, p)[0]
+        if v >= len(S) or not S[v].startswith("/"): continue
         n = struct.unpack_from("<I", L, p - 4)[0]
-        if 0 < n < 100000:
-            try:
-                return p - 4, read_sounddefs(L, S, p - 4)
-            except Exception:
-                pass
-        p = L.rfind(pat, 0, p)
-    raise ValueError("no sound definition table")
+        if not 0 < n < 100000 or (best and n <= len(best[1])): continue
+        try:
+            defs = read_sounddefs(L, S, p - 4)
+        except Exception:
+            continue
+        if all(d["name"].startswith("/") for d in defs): best = (p - 4, defs)
+    if not best: raise ValueError("no sound definition table")
+    return best
 
 
 def read_sounddefs(L, S, at):
     r = R(L, at); n = r.u32(); defs = []
     for _ in range(n):
-        name = S[r.u32()]; cfg = r.u32(); ne = r.u32(); ents = []
+        name = S[r.u32()]
+        if not name.startswith("/"): raise ValueError("not a sound definition")
+        cfg = r.u32(); ne = r.u32(); ents = []
         for _ in range(ne):
             t = r.u32(); w = r.u32()
             if t == 0:
@@ -108,13 +113,18 @@ def read_sounddefs(L, S, at):
     return defs
 
 
+LAYER = re.compile(rb"\x02\x00\xff\xff..([\x01-\x08])\x00([\x00-\x20])\x00(..)", re.S)
+
+
 def walk(path, simple_off=172):
     """Event tree -> (parsed, sound defs, [{path, type, raw: [sound def indices]}]).
     Groups: u32 name, u32 nprops (0 here), u32 nsubgroups, u32 nevents,
     subgroups, events. An event starts u32 type (0x10 simple, 8 complex),
     u32 name, 16-byte GUID, and ends with its category path string. A simple
-    event's sound definition is the u16 at +172; a complex event's sound
-    instances are u16 indices after the bytes 01 00 01 00 (found by scan)."""
+    event's sound definition is the u16 at +172; a complex event has layers,
+    each u16 flags (2), i16 priority (-1), i16 parameter, u16 nsounds,
+    u16 nenvelopes, then sound instances starting with a u16 sound definition
+    (layer headers found by scan)."""
     P = parse(path); L = P["L"]; S = P["S"]
     at, defs = find_sounddefs(L, S)
     catpaths = set(); stack = []
@@ -137,7 +147,7 @@ def walk(path, simple_off=172):
         if typ == 0x10:
             raws = [struct.unpack_from("<H", L, st + simple_off)[0]]
         else:
-            raws = [struct.unpack("<H", m.group(1))[0] for m in re.finditer(rb"\x01\x00\x01\x00(..)", body, re.S)]
+            raws = [struct.unpack("<H", m.group(3))[0] for m in LAYER.finditer(body)]
         events.append(dict(path=gp + "/" + name, type=typ, raw=raws, st=st, end=j + n)); r.p = j + n
 
     def parse_group(gp):
