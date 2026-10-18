@@ -81,6 +81,15 @@ int       ds_sdl_make_current(int on);
 void      ds_sdl_swap(void);
 void      ds_sdl_pump(void (*post)(uint32_t msg, uint32_t wp, uint32_t lp));
 int       ds_sdl_xinput(uint16_t *buttons, uint8_t *lt, uint8_t *rt, int16_t thumbs[4]);
+/* sound (ds_audio.c; DS_AUDIO=sdl) */
+uint32_t  ds_audio_event_new(const char *path);
+void      ds_audio_event_start(uint32_t id);
+void      ds_audio_event_stop(uint32_t id);
+void      ds_audio_event_release(uint32_t id);
+void      ds_audio_event_volume(uint32_t id, float vol);
+void      ds_audio_event_pos(uint32_t id, float x, float y, float z);
+int       ds_audio_event_playing(uint32_t id);
+void      ds_audio_listener(float x, float y, float z);
 uint32_t  ds_frame_count(void);                           /* frames swapped so far (ds_gles.c) */
 void      ds_set_last_error(uint32_t err);                /* kernel32 GetLastError value */
 const char *ds_cwd(void);                                 /* guest current directory (Z:\...) */

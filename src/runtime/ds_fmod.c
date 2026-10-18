@@ -17,6 +17,9 @@
 #include "ds_hle.h"
 
 #define FMOD_OK 0u
+/* a float argument / a float in guest memory */
+static inline float AF32(int i) { uint32_t u = A32(i); float f; memcpy(&f, &u, 4); return f; }
+static inline float AFP(uint32_t va) { uint32_t u = MEM32(va); float f; memcpy(&f, &u, 4); return f; }
 #define FMOD_EVENT_VERSION 0x00044464u     /* what the exe was built against (it logs both) */
 #define FMOD_EVENT_STATE_READY 0x1u
 
@@ -154,7 +157,9 @@ static void sh_ES_getProjectByIndex(void) {              /* (this, index, EventP
 }
 static void sh_ES_getEvent(void) {                       /* (this, name, mode, Event **) */
     trace("getEvent", ASTR(1));
-    out_obj(A32(3), FO_EVENT);
+    uint32_t o = obj_new(FO_EVENT);
+    if (!(A32(2) & 0x4u)) MEM32(o + 8) = ds_audio_event_new(ASTR(1));   /* not FMOD_EVENT_INFOONLY */
+    if (A32(3)) MEM32(A32(3)) = o;
     RET(FMOD_OK, 4);
 }
 static void sh_ES_getCategory(void) { out_obj(A32(2), FO_CATEGORY); RET(FMOD_OK, 3); }   /* (this, name, EventCategory **) */
@@ -164,16 +169,29 @@ static void sh_ES_getReverbPreset(void) {                /* (this, name, FMOD_RE
     if (A32(3)) MEM32(A32(3)) = 0;
     RET(FMOD_OK, 4);
 }
-static void sh_ES_set3DListenerAttributes(void) { RET(FMOD_OK, 6); }  /* (this, listener, pos, vel, forward, up) */
+static void sh_ES_set3DListenerAttributes(void) {     /* (this, listener, pos, vel, forward, up) */
+    uint32_t p = A32(2);
+    if (p && A32(1) == 0) ds_audio_listener(AFP(p), AFP(p + 4), AFP(p + 8));
+    RET(FMOD_OK, 6);
+}
 static void sh_ES_update(void)      { RET(FMOD_OK, 1); }
 static void sh_ES_release(void)     { RET(FMOD_OK, 1); }
 
-static void sh_Ev_start(void)       { RET(FMOD_OK, 1); }
-static void sh_Ev_stop(void)        { RET(FMOD_OK, 2); }  /* (this, bool immediate) */
-static void sh_Ev_release(void)     { RET(FMOD_OK, 3); }  /* (this, bool freeeventdata, bool waituntilready) */
-static void sh_Ev_setVolume(void)   { RET(FMOD_OK, 2); }  /* (this, float) */
-static void sh_Ev_set3DAttributes(void) { RET(FMOD_OK, 4); }  /* (this, pos, vel, orientation) */
-static void sh_Ev_getState(void)    { if (A32(1)) MEM32(A32(1)) = FMOD_EVENT_STATE_READY; RET(FMOD_OK, 2); }
+/* an Event's audio id (ds_audio.c) lives in the object's extra word (+8) */
+#define EV_ID() (A32(0) ? MEM32(A32(0) + 8) : 0)
+static void sh_Ev_start(void)       { ds_audio_event_start(EV_ID()); RET(FMOD_OK, 1); }
+static void sh_Ev_stop(void)        { ds_audio_event_stop(EV_ID()); RET(FMOD_OK, 2); }    /* (this, bool immediate) */
+static void sh_Ev_release(void)     { ds_audio_event_release(EV_ID()); if (A32(0)) MEM32(A32(0) + 8) = 0; RET(FMOD_OK, 3); }  /* (this, freeeventdata, waituntilready) */
+static void sh_Ev_setVolume(void)   { ds_audio_event_volume(EV_ID(), AF32(1)); RET(FMOD_OK, 2); }   /* (this, float) */
+static void sh_Ev_set3DAttributes(void) {                 /* (this, pos, vel, orientation) */
+    uint32_t p = A32(1);
+    if (p) ds_audio_event_pos(EV_ID(), AFP(p), AFP(p + 4), AFP(p + 8));
+    RET(FMOD_OK, 4);
+}
+static void sh_Ev_getState(void) {                        /* READY, plus PLAYING while a voice runs */
+    if (A32(1)) MEM32(A32(1)) = FMOD_EVENT_STATE_READY | (ds_audio_event_playing(EV_ID()) ? 0x8u : 0u);
+    RET(FMOD_OK, 2);
+}
 static void sh_Ev_getParameter(void){ out_obj(A32(2), FO_PARAM); RET(FMOD_OK, 3); }   /* (this, name, EventParameter **) */
 static void sh_EvP_setValue(void)   { RET(FMOD_OK, 2); }  /* (this, float) */
 
