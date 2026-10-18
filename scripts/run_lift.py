@@ -110,8 +110,18 @@ def cmd_lift(exe, catalog, outdir, split=400, names_path=None, prefix=""):
     hooks = read_va_list(os.path.join(cfg, "hooks.txt"))
     md = Cs(CS_ARCH_X86, CS_MODE_32)
     md.detail = True
+    # thunks `jmp dword ptr [IAT slot]` to the CRT's setjmp (RECOMP_HOST_SETJMP)
+    setjmp_calls = set()
+    for a in lifted:
+        o = a - base
+        if img[o:o + 2] == b"\xff\x25":
+            slot = int.from_bytes(img[o + 2:o + 6], "little")
+            if iat.get(slot, ("", ""))[1] in ("_setjmp3", "_setjmp", "setjmp"):
+                setjmp_calls.add(a)
+    if setjmp_calls:
+        print(f"[*] setjmp thunks: {', '.join(f'0x{a:08X}' for a in sorted(setjmp_calls))}")
     lifter = Lifter(iat_map=iat, func_names={}, lifted=lifted, precise_carry=True,
-                    hook_sites=set(hooks))
+                    hook_sites=set(hooks), setjmp_calls=setjmp_calls)
     os.makedirs(outdir, exist_ok=True)
     for fn in os.listdir(outdir):
         if fn.startswith(prefix + "recomp_") and fn.endswith((".c", ".h")):

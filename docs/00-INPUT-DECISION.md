@@ -1,5 +1,17 @@
 # Decisão de input: qual binário recompilar
 
+> **2026-10-18 — input switched to the DRM-free standalone build / input trocado para o build standalone DRM-free.**
+> EN: the Steam build (`dontstarve_steam.exe`) calls `SteamAPI_Init()` before creating its window
+> and exits without a running Steam client. The project does not fake Steam ownership, so it now
+> lifts the **standalone DRM-free** `dontstarve.exe` (same VC9 toolchain and imports minus
+> `steam_api`; 3,315,200 bytes, SHA-256 `86c22c2bca9cd948a3180a8c71037fe7c368d03c3dd44680853ed1d8a15338fd`,
+> 16,146 functions). The decision below (32-bit PE, not the Linux ELF) is unchanged.
+> PT: o build Steam (`dontstarve_steam.exe`) chama `SteamAPI_Init()` antes de criar a janela e sai
+> sem o cliente da Steam rodando. O projeto não falsifica posse na Steam, então agora lifta o
+> `dontstarve.exe` **standalone DRM-free** (mesmo toolchain VC9 e mesmos imports, menos o
+> `steam_api`; 3.315.200 bytes, SHA-256 acima, 16.146 funções). A decisão abaixo (PE 32-bit, não
+> o ELF Linux) continua a mesma.
+
 **Data:** 2026-10-17
 **Decisão:** recompilar o **EXE Windows x86-32** (`dontstarve_steam.exe`), pelo
 caminho **32-bit PE** do pcrecomp. **NÃO** o ELF Linux x86-64.

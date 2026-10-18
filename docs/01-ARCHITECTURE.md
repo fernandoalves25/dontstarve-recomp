@@ -1,6 +1,6 @@
 # Arquitetura do port nativo (Don't Starve → R36S ARM64)
 
-Recompilação estática de `dontstarve_steam.exe` (x86-32 PE) para C99 nativo via
+Recompilação estática do `dontstarve.exe` standalone DRM-free (x86-32 PE) para C99 nativo via
 pcrecomp (`a847ef6` = `35548b8` + 14 patches NFSU2), compilado para aarch64
 (RK3326, Cortex-A35, glibc ≤ 2.30). Sem box64, sem tradução em runtime.
 
@@ -8,7 +8,7 @@ Modelo copiado do `nfsu2-ref` (mesmo aparelho, mesma ferramenta). O que muda é
 descrito em "Deltas vs NFSU2" abaixo.
 
 ```
-   dontstarve_steam.exe (x86-32)
+   dontstarve.exe (x86-32, standalone DRM-free)
             │  pcrecomp: pe_analyze → disasm32 (+ seeds vtable/rtti) → lift32 (+simd32)
             ▼
    ~N funções C99  (src/recomp/gen/recomp_*.c)   [N a medir no catálogo]
@@ -36,11 +36,11 @@ descrito em "Deltas vs NFSU2" abaixo.
 |---|---|---|
 | **CRT / C++ runtime** | MSVCR90 (182), MSVCP90 (113) | `win32hle`/`recomp32` cobrem a superfície comum; lacunas viram stub e são preenchidas iterativamente. Maior superfície única (295). |
 | **Win32 core** | KERNEL32 (75), USER32 (44), GDI32 (9), ADVAPI32 (3), SHELL32 (5), ole32 (6), OLEAUT32 (3), WINMM (2) | `win32hle` reaproveitado do pcrecomp/NFSU2. Janela/superfície criada aqui (ver gráficos). |
-| **Gráficos** ⭐ | libGLESv2 (76), libEGL (9) | **Ponte fina GLES2/EGL → nativo (Mali/gl4es).** Passa quase direto; shaders GLSL ES compilam direto. **Sem MojoShader, sem D3D9.** |
+| **Gráficos** ⭐ | libGLESv2 (76), libEGL (9) | **Ponte fina GLES2/EGL → nativo (Mali/gl4es), feita em `ds_gles.c`.** Passa quase direto; shaders GLSL ES compilam direto. **Sem MojoShader, sem D3D9.** |
 | **Áudio** ⚠ | fmodex (21), fmod_event (24) | **Peça custom mais pesada do DS.** FMOD Ex 4.44 não tem build ARM64. Implementar o subconjunto da API FMOD Ex + Event que o DS usa sobre backend nativo (SDL_audio/miniaudio), decodificando bancos FSB5/Vorbis. Permitir bring-up **mudo** primeiro. |
 | **Input** | DINPUT8 (1), XINPUT1_3 (5) | Ponte para SDL2 GameController / evdev. Pequeno. |
 | **Rede (single-player)** | WSOCK32 (29), WLDAP32 (16), WS2_32 (2) | Stub para single-player (offline). |
-| **Plataforma/telemetria** | steam_api (12), twitchsdk_32 (28) | Stub. steam_api → "não rodando sob Steam" (fallback offline, DRM-free, cópia do próprio usuário; **nunca forjar licença**). Twitch irrelevante no handheld. |
+| **Plataforma/telemetria** | steam_api (12, só no build Steam), twitchsdk_32 (28) | O build standalone DRM-free não importa `steam_api`; o shim responde "não rodando sob Steam" (**nunca forjar licença**). Twitch irrelevante no handheld. |
 
 ## Deltas vs NFSU2 (o que muda neste port)
 

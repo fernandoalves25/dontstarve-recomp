@@ -8,14 +8,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <stdint.h>
 #include <pthread.h>
 #include "ds_hle.h"
 
 #define DS_GAME_ROOT "Z:\\dontstarve"
-#define DS_EXE_PATH  DS_GAME_ROOT "\\bin\\dontstarve_steam.exe"
-enum { HK_HEAP = 1, HK_MODULE, HK_FILE, HK_MUTEX, HK_EVENT, HK_THREAD };
+#define DS_EXE_PATH  DS_GAME_ROOT "\\bin\\dontstarve.exe"
 
 /* ---- a guest string helper: copy a C string into the arena, return its VA ---- */
 static uint32_t ds_guest_strdup(const char *s) {
@@ -72,28 +72,36 @@ static void sh_GetStartupInfoA(void) {
 }
 static void sh_GetCurrentProcess(void)   { RET(0xFFFFFFFFu, 0); }   /* pseudo-handle */
 static void sh_GetCurrentProcessId(void) { RET(0x1000, 0); }
-static void sh_GetCurrentThreadId(void)  { RET(0x1001, 0); }
 static void sh_ExitProcess(void) { fprintf(stderr, "[ds] guest ExitProcess(%u)\n", A32(0)); exit((int)A32(0)); }
 
 /* ===================== heap ===================== */
 static void sh_GetProcessHeap(void) { RET(ds_handle_new(HK_HEAP, 0), 0); }
 static void sh_HeapCreate(void)     { RET(ds_handle_new(HK_HEAP, 0), 3); }
 static void sh_HeapDestroy(void)    { RET(1, 1); }
+/* Bump allocator with an 8-byte header holding the block size, so HeapSize
+ * (the CRT's _msize, e.g. when it grows the onexit table) and HeapReAlloc's
+ * copy see the real size. Blocks stay 8-aligned. */
+static uint32_t heap_alloc(uint32_t size) {
+    uint32_t va = ds_arena_alloc((size ? size : 1) + 8u, 8) + 8u;
+    MEM32(va - 8) = size;
+    return va;
+}
 static void sh_HeapAlloc(void) {
     /* (hHeap, dwFlags, dwBytes) */
     uint32_t flags = A32(1), size = A32(2);
-    uint32_t va = ds_arena_alloc(size ? size : 1, 8);
+    uint32_t va = heap_alloc(size);
     if (flags & 0x8) memset(ds_hostptr(va), 0, size);  /* HEAP_ZERO_MEMORY */
     RET(va, 3);
 }
 static void sh_HeapFree(void)   { RET(1, 3); }
-static void sh_HeapSize(void)   { RET(0, 3); }
+static void sh_HeapSize(void)   { uint32_t p = A32(2); RET(p ? MEM32(p - 8) : 0xFFFFFFFFu, 3); }
 static void sh_HeapReAlloc(void) {
-    /* (hHeap, flags, mem, size) - bump allocator: new block + copy (old size
-     * unknown; copy `size` which is >= old for a grow, the common case). */
-    uint32_t oldva = A32(2), size = A32(3);
-    uint32_t va = ds_arena_alloc(size ? size : 1, 8);
-    if (oldva) memcpy(ds_hostptr(va), ds_hostptr(oldva), size);
+    /* (hHeap, flags, mem, size): new block + copy of min(old, new) */
+    uint32_t flags = A32(1), oldva = A32(2), size = A32(3);
+    uint32_t va = heap_alloc(size);
+    uint32_t old = oldva ? MEM32(oldva - 8) : 0;
+    if (oldva) memcpy(ds_hostptr(va), ds_hostptr(oldva), old < size ? old : size);
+    if ((flags & 0x8) && size > old) memset(ds_hostptr(va + old), 0, size - old);
     RET(va, 4);
 }
 
@@ -159,7 +167,13 @@ static void cs_init_struct(uint32_t va) {
 static void sh_InitializeCriticalSection(void)        { uint32_t v = A32(0); cs_init_struct(v); cs_mutex(v); RETV(1); }
 static void sh_InitializeCriticalSectionAndSpinCount(void) { uint32_t v = A32(0); cs_init_struct(v); cs_mutex(v); RET(1, 2); }
 static void sh_DeleteCriticalSection(void)            { RETV(1); }  /* keep the host mutex alive */
-static void sh_EnterCriticalSection(void)             { pthread_mutex_t *m = cs_mutex(A32(0)); if (m) pthread_mutex_lock(m); RETV(1); }
+static void sh_EnterCriticalSection(void) {
+    pthread_mutex_t *m = cs_mutex(A32(0));
+    if (m && pthread_mutex_trylock(m) != 0) {      /* contended: let the owner run */
+        int d = ds_block_begin(); pthread_mutex_lock(m); ds_block_end(d);
+    }
+    RETV(1);
+}
 static void sh_LeaveCriticalSection(void)             { pthread_mutex_t *m = cs_mutex(A32(0)); if (m) pthread_mutex_unlock(m); RETV(1); }
 static void sh_TryEnterCriticalSection(void)          { pthread_mutex_t *m = cs_mutex(A32(0)); RET(m && pthread_mutex_trylock(m) == 0 ? 1 : 0, 1); }
 
@@ -189,7 +203,8 @@ static void sh_QueryPerformanceFrequency(void) {
 }
 
 /* ===================== error / misc ===================== */
-static uint32_t g_last_error;
+static __thread uint32_t g_last_error;   /* per thread, as in Win32 */
+void ds_set_last_error(uint32_t err) { g_last_error = err; }
 static void sh_GetLastError(void)              { RET(g_last_error, 0); }
 static void sh_SetLastError(void)              { g_last_error = A32(0); RETV(1); }
 static void sh_SetUnhandledExceptionFilter(void) { RET(0, 1); }
@@ -292,17 +307,8 @@ static void sh_SetEnvironmentVariableA(void) { RET(1, 2); }
 
 /* std handles carry their nStdHandle id in the token's obj */
 static void sh_GetStdHandle(void) { RET(ds_handle_new(HK_FILE, (void *)(intptr_t)(int32_t)A32(0)), 1); }
-static void sh_GetFileType(void)  { RET(2, 1); }              /* FILE_TYPE_CHAR */
 static void sh_SetHandleCount(void){ RET(A32(0), 1); }
-static void sh_WriteFile(void) {   /* (h, buf, n, *written, ovl) -> host stdout/stderr */
-    uint32_t h = A32(0), n = A32(2);
-    int id = (int)(intptr_t)ds_handle_get(h, HK_FILE);
-    FILE *out = (id == -12) ? stderr : stdout;
-    size_t w = fwrite(ds_hostptr(A32(1)), 1, n, out);
-    if (A32(3)) MEM32(A32(3)) = (uint32_t)w;
-    RET(1, 5);
-}
-static void sh_CloseHandle(void)  { RET(1, 1); }
+/* WriteFile, GetFileType, CloseHandle: ds_file.c (host files + std handles) */
 
 static void sh_GetACP(void)   { RET(1252, 0); }
 static void sh_GetOEMCP(void) { RET(437, 0); }
@@ -344,7 +350,16 @@ static void sh_GetUserDefaultLCID(void) { RET(0x0409, 0); }
 static void sh_IsValidLocale(void) { RET(1, 2); }
 static void sh_EnumSystemLocalesA(void) { RET(1, 2); }
 
-static void sh_GetModuleHandleW(void)   { RET(A32(0) ? ds_handle_new(HK_MODULE, 0) : 0x00400000u, 1); }
+static void sh_GetModuleHandleW(void) {
+    uint32_t p = A32(0);
+    if (!p) RET(0x00400000u, 1);
+    char nm[64]; uint32_t i = 0;                  /* narrow the name (ASCII) */
+    for (; i < sizeof nm - 1 && MEM16(p + 2 * i); i++) nm[i] = (char)MEM16(p + 2 * i);
+    nm[i] = 0;
+    /* no CLR: the CRT's exit path must not take the CorExitProcess route */
+    if (!strncasecmp(nm, "mscoree", 7)) { g_last_error = 126; RET(0, 1); }   /* ERROR_MOD_NOT_FOUND */
+    RET(ds_handle_new(HK_MODULE, 0), 1);
+}
 static void sh_GetModuleFileNameW(void) { if (A32(2)) MEM16(A32(1)) = 0; RET(0, 3); }
 static void sh_GetStartupInfoW(void)    { uint32_t p = A32(0); memset(ds_hostptr(p), 0, 68); MEM32(p) = 68; RETV(1); }
 static void sh_GetVersionExW(void)      { uint32_t p = A32(0); MEM32(p+4)=6; MEM32(p+8)=1; MEM32(p+12)=7600; MEM32(p+16)=2; RET(1,1); }
@@ -369,7 +384,6 @@ static void sh_FlsAlloc(void)    { RET(g_fls_next < NSLOT ? (uint32_t)g_fls_next
 static void sh_FlsSetValue(void) { uint32_t i = A32(0); if (i < NSLOT) t_fls[i] = A32(1); RET(1, 2); }
 static void sh_FlsGetValue(void) { uint32_t i = A32(0); RET(i < NSLOT ? t_fls[i] : 0, 1); }
 static void sh_FlsFree(void)     { RET(1, 1); }
-static void sh_Sleep(void)       { RETV(1); }
 static void sh_RtlUnwind(void)   { RETV(4); }   /* SEH unwind: no-op for now */
 static uint32_t g_cmdlineW;
 static void sh_GetCommandLineW(void) {
@@ -389,6 +403,7 @@ static void sh_GetProcessAffinityMask(void) { if (A32(1)) MEM32(A32(1)) = 0xF; i
  * Z:\dontstarve\bin, the data in Z:\dontstarve\data. File I/O maps onto the
  * host later; these only answer queries about the layout. */
 static char g_cwd[260] = DS_GAME_ROOT "\\bin";
+const char *ds_cwd(void) { return g_cwd; }
 
 static uint32_t copy_out_a(uint32_t dst, uint32_t cap, const char *s) {   /* Win32 buffer rules */
     uint32_t n = (uint32_t)strlen(s);
@@ -396,16 +411,7 @@ static uint32_t copy_out_a(uint32_t dst, uint32_t cap, const char *s) {   /* Win
     memcpy(ds_hostptr(dst), s, n + 1);
     return n;
 }
-/* Mutexes/semaphores: one machine lock serialises guest threads, so the
- * objects only need to exist; waits succeed at once. */
-static void sh_CreateMutexA(void)      { g_last_error = 0; RET(ds_handle_new(HK_MUTEX, 0), 3); }
-static void sh_ReleaseMutex(void)      { RET(1, 1); }
-static void sh_CreateSemaphoreA(void)  { g_last_error = 0; RET(ds_handle_new(HK_EVENT, 0), 4); }
-static void sh_ReleaseSemaphore(void)  { if (A32(2)) MEM32(A32(2)) = 0; RET(1, 3); }
-static void sh_WaitForSingleObject(void)    { RET(0, 2); }   /* WAIT_OBJECT_0 */
-static void sh_WaitForMultipleObjects(void) { RET(0, 4); }
-static void sh_SleepEx(void)           { RET(0, 2); }
-static void sh_SetThreadPriority(void) { RET(1, 2); }
+/* threads, waits, mutexes, semaphores, Sleep: ds_thread.c */
 static void sh_OutputDebugStringA(void){ fprintf(stderr, "[guest] %s", ASTR(0)); RETV(1); }
 static void sh_lstrlenA(void)          { RET(A32(0) ? (uint32_t)strlen(ASTR(0)) : 0, 1); }
 static void sh_GlobalLock(void)        { RET(A32(0), 1); }   /* GMEM_FIXED: handle == pointer */
@@ -458,7 +464,30 @@ static void sh_ExpandEnvironmentStringsA(void) {   /* returns chars incl. NUL */
     uint32_t r = copy_out_a(A32(1), A32(2), ASTR(0));
     RET(r < A32(2) ? r + 1 : r, 3);
 }
+static void sh_GetTimeZoneInformation(void) {      /* TIME_ZONE_INFORMATION (172 bytes): UTC */
+    memset(ds_hostptr(A32(0)), 0, 172);
+    RET(0, 1);                                     /* TIME_ZONE_ID_UNKNOWN */
+}
+/* FILETIME (100 ns since 1601) <-> SYSTEMTIME; local time is UTC (see GetTimeZoneInformation) */
+static void sh_FileTimeToLocalFileTime(void) {     /* (const FILETIME *, FILETIME *) */
+    MEM32(A32(1)) = MEM32(A32(0)); MEM32(A32(1) + 4) = MEM32(A32(0) + 4);
+    RET(1, 2);
+}
+static void sh_FileTimeToSystemTime(void) {        /* (const FILETIME *, SYSTEMTIME *: 8 WORDs) */
+    uint64_t ft = ((uint64_t)MEM32(A32(0) + 4) << 32) | MEM32(A32(0));
+    time_t t = (time_t)(ft / 10000000ull) - (time_t)11644473600ll;
+    struct tm tm; gmtime_r(&t, &tm);
+    uint32_t p = A32(1);
+    MEM16(p) = (uint16_t)(tm.tm_year + 1900); MEM16(p + 2) = (uint16_t)(tm.tm_mon + 1);
+    MEM16(p + 4) = (uint16_t)tm.tm_wday; MEM16(p + 6) = (uint16_t)tm.tm_mday;
+    MEM16(p + 8) = (uint16_t)tm.tm_hour; MEM16(p + 10) = (uint16_t)tm.tm_min;
+    MEM16(p + 12) = (uint16_t)tm.tm_sec; MEM16(p + 14) = (uint16_t)((ft / 10000ull) % 1000ull);
+    RET(1, 2);
+}
 static void sh_RaiseException(void) {
+    /* MS_VC_EXCEPTION: "set this thread's name", raised for an attached
+     * debugger; without one the thread code's own __except swallows it. */
+    if (A32(0) == 0x406D1388u) RETV(4);
     ds_fatal("guest RaiseException(code 0x%08X, flags %u, nargs %u) from 0x%08X",
              A32(0), A32(1), A32(2), g_cur_func);
 }
@@ -475,7 +504,6 @@ const ds_shim ds_kernel32[] = {
     { "GetStartupInfoA", sh_GetStartupInfoA },
     { "GetCurrentProcess", sh_GetCurrentProcess },
     { "GetCurrentProcessId", sh_GetCurrentProcessId },
-    { "GetCurrentThreadId", sh_GetCurrentThreadId },
     { "ExitProcess", sh_ExitProcess },
     { "GetProcessHeap", sh_GetProcessHeap },
     { "HeapCreate", sh_HeapCreate },
@@ -552,9 +580,7 @@ const ds_shim ds_kernel32[] = {
     { "FreeEnvironmentStringsA", sh_FreeEnvironmentStringsA },
     { "FreeEnvironmentStringsW", sh_FreeEnvironmentStringsW },
     { "SetEnvironmentVariableA", sh_SetEnvironmentVariableA },
-    { "GetStdHandle", sh_GetStdHandle }, { "GetFileType", sh_GetFileType },
-    { "SetHandleCount", sh_SetHandleCount }, { "WriteFile", sh_WriteFile },
-    { "CloseHandle", sh_CloseHandle },
+    { "GetStdHandle", sh_GetStdHandle }, { "SetHandleCount", sh_SetHandleCount },
     { "GetACP", sh_GetACP }, { "GetOEMCP", sh_GetOEMCP },
     { "IsValidCodePage", sh_IsValidCodePage }, { "GetCPInfo", sh_GetCPInfo },
     { "GetStringTypeW", sh_GetStringTypeW }, { "GetStringTypeA", sh_GetStringTypeA },
@@ -573,14 +599,10 @@ const ds_shim ds_kernel32[] = {
     { "GetSystemInfo", sh_GetSystemInfo },
     { "FlsAlloc", sh_FlsAlloc }, { "FlsSetValue", sh_FlsSetValue },
     { "FlsGetValue", sh_FlsGetValue }, { "FlsFree", sh_FlsFree },
-    { "Sleep", sh_Sleep }, { "RtlUnwind", sh_RtlUnwind },
+    { "RtlUnwind", sh_RtlUnwind },
     { "GetCommandLineW", sh_GetCommandLineW }, { "GetModuleHandleExW", sh_GetModuleHandleExW },
     { "GetProcessAffinityMask", sh_GetProcessAffinityMask },
     /* WinMain-era batch */
-    { "CreateMutexA", sh_CreateMutexA }, { "ReleaseMutex", sh_ReleaseMutex },
-    { "CreateSemaphoreA", sh_CreateSemaphoreA }, { "ReleaseSemaphore", sh_ReleaseSemaphore },
-    { "WaitForSingleObject", sh_WaitForSingleObject }, { "WaitForMultipleObjects", sh_WaitForMultipleObjects },
-    { "SleepEx", sh_SleepEx }, { "SetThreadPriority", sh_SetThreadPriority },
     { "OutputDebugStringA", sh_OutputDebugStringA }, { "lstrlenA", sh_lstrlenA },
     { "GlobalLock", sh_GlobalLock }, { "GlobalUnlock", sh_GlobalUnlock },
     { "FlushConsoleInputBuffer", sh_FlushConsoleInputBuffer }, { "LoadLibraryW", sh_LoadLibraryW },
@@ -589,10 +611,19 @@ const ds_shim ds_kernel32[] = {
     { "GetCurrentDirectoryA", sh_GetCurrentDirectoryA }, { "SetCurrentDirectoryA", sh_SetCurrentDirectoryA },
     { "GetFullPathNameA", sh_GetFullPathNameA }, { "GetLongPathNameA", sh_GetLongPathNameA },
     { "ExpandEnvironmentStringsA", sh_ExpandEnvironmentStringsA }, { "RaiseException", sh_RaiseException },
+    { "GetTimeZoneInformation", sh_GetTimeZoneInformation },
+    { "FileTimeToLocalFileTime", sh_FileTimeToLocalFileTime }, { "FileTimeToSystemTime", sh_FileTimeToSystemTime },
     { 0, 0 }
 };
 
 void ds_host_init(void) {
     ds_register(ds_kernel32);
     ds_register(ds_win32);
+    ds_register(ds_user32);
+    ds_register(ds_file);
+    ds_register(ds_net);
+    ds_register(ds_thread);
+    ds_register(ds_gles);
+    ds_register(ds_input);
+    ds_register(ds_fmod);
 }

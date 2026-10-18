@@ -65,7 +65,12 @@ static void sh_SHGetFolderPathW(void) {      /* (hwnd, csidl, token, flags, pszP
     for (uint32_t i = 0; ; i++) { MEM16(d + 2 * i) = (uint8_t)s[i]; if (!s[i]) break; }
     RET(S_OK, 5);
 }
-static void sh_SHCreateDirectoryExA(void)  { fprintf(stderr, "[ds] SHCreateDirectoryExA(%s)\n", ASTR(1)); RET(0, 3); }
+static void sh_SHCreateDirectoryExA(void) {  /* (hwnd, path, sec) -> ERROR_SUCCESS / ERROR_ALREADY_EXISTS */
+    char host[512];
+    int existed = ds_map_path(ASTR(1), host, sizeof host) == 1;
+    if (existed) RET(183, 3);
+    RET(ds_mkdirs(ASTR(1)) ? 0 : 3 /*ERROR_PATH_NOT_FOUND*/, 3);
+}
 static void sh_ShellExecuteA(void)         { RET(2, 6); }      /* <= 32: failure (file not found) */
 static void sh_SHBrowseForFolderA(void)    { RET(0, 1); }      /* cancelled */
 static void sh_SHGetPathFromIDListA(void)  { RET(0, 2); }
@@ -96,6 +101,9 @@ const ds_shim ds_win32[] = {
     { "CoSetProxyBlanket", sh_CoSetProxyBlanket }, { "CoCreateInstance", sh_CoCreateInstance },
     { "SysAllocString", sh_SysAllocString }, { "SysFreeString", sh_SysFreeString },
     { "VariantClear", sh_VariantClear },
+    /* the exe imports OLEAUT32 by ordinal */
+    { "OLEAUT32.dll#2", sh_SysAllocString }, { "OLEAUT32.dll#6", sh_SysFreeString },
+    { "OLEAUT32.dll#9", sh_VariantClear },
     { "RegisterEventSourceA", sh_RegisterEventSourceA },
     { "DeregisterEventSource", sh_DeregisterEventSource }, { "ReportEventA", sh_ReportEventA },
     { "GetProcessMemoryInfo", sh_GetProcessMemoryInfo },

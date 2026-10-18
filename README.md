@@ -29,7 +29,7 @@ and the PC UI.
 
 ### How it works
 
-1. The Windows `dontstarve_steam.exe` (x86-32 PE, VC9) is disassembled and lifted to C99.
+1. The Windows **DRM-free standalone** `dontstarve.exe` (x86-32 PE, VC9) is disassembled and lifted to C99.
    *(pcrecomp has no ELF front-end — its "64-bit path" is Win64 PE — so the Linux build is not usable.)*
 2. The **VC9 C/C++ runtime** (`msvcr90.dll`, `msvcp90.dll`) is **lifted too**, so the STL and
    CRT run as guest code with their exact ABI — no hand-written `std::string` shims.
@@ -43,7 +43,8 @@ and the PC UI.
 **How much of the game actually runs.** Every function is already *lifted* to C — that's the
 easy part. What matters is how many have **executed** natively without crashing. Each cell ≈ 16
 functions: **bright = ran at runtime**, dim = lifted but never reached yet. Today execution runs
-through the CRT startup into the game's own `main()`, and stops at the first Win32 window calls. The map
+through the CRT startup and the game's own init, creates the game window and a real GLES2 context,
+and stops at the first FMOD (audio) call. The map
 fills in as the port progresses (measured with a `COVERAGE=1` build, see `scripts/coverage_counts.py`).
 
 ![progress map](docs/progress-en.svg)
@@ -53,27 +54,60 @@ fills in as the port progresses (measured with a `COVERAGE=1` build, see `script
 | Milestone | Status |
 |---|---|
 | M0 Input decision + toolchain | ✅ done |
-| M1 Function catalog — 17,033 functions | ✅ done |
+| M1 Function catalog — 16,146 functions (standalone exe) | ✅ done |
 | M2 Lift to C99 — 4.2M lines, **0 failures** | ✅ done |
 | M3 Compiles + links (exe + 2 lifted CRT DLLs) | ✅ done |
 | M4 Arena host, IAT binding (955/955), CRT `DllMain` runs | ✅ done |
 | M5 CRT initialization — both CRT `DllMain`s + exe CRT startup, game `main()` runs | ✅ done |
-| **M6 Native main menu** | 🟡 **in progress — Win32 window + GLES2 context** |
+| **M6 Native main menu** | 🟡 **in progress — window + EGL/GLES2 bridge done; FMOD (silent) next** |
 | M7 Stability | ⬜ |
 | M8 Audio (FMOD Ex shim) | ⬜ |
 | M9 PortMaster package + FPS vs box64 | ⬜ |
 
 ### 🙋 Where help is needed
 
-The recompiled VC9 CRT now initializes completely and the game's own `main()` runs:
-**630 functions executed, 262 of them in the game exe**. It prints its first line (a failed WMI
-hardware query — harmless). Every missing import stops the run with its own name, so the loop
-is: write the shim, rebuild, rerun. Next up:
+**Current wall: `FMOD_EventSystem_Create`, the first audio call.** The port lifts the game's
+**DRM-free standalone build** (`dontstarve.exe`, 16,146 functions, 0 lift failures); the Steam one
+won't start without a running Steam client. Execution reaches **1,335 functions (787 in the game
+exe)**. The game writes its own `log.txt`, probes its DLC/patch folders and settings, creates its
+`"opengles2.0"` window, brings up **EGL + GLES2 for real** (on the host's native driver, Mesa
+llvmpipe in CI-style headless runs), queries the GL texture formats, enumerates input devices,
+reaches `cDontStarveGame::DoGameSpecificInitialize()` and creates the FMOD event system.
 
-- **USER32 / GDI32** — window, message pump, cursor, display modes (planned over SDL2/KMSDRM).
-- **libEGL / libGLESv2** (imported by ordinal, ANGLE) → bridge to native GLES2 on the Mali GPU.
-- **FMOD Ex + FMOD Event** API shim; **XINPUT/DINPUT8** → SDL2 game controller; file I/O
-  mapped onto the game data directory.
+What's in the runtime now ([src/runtime](src/runtime)):
+
+- **EGL/GLES2 bridge** ([ds_gles.c](src/runtime/ds_gles.c)): the 9 EGL + 76 GLES2 ANGLE imports
+  (by ordinal, mapped from the game's own `libEGL.dll`/`libGLESv2.dll` export tables) straight onto
+  native EGL/GLES2. Headless for now: a 640×480 pbuffer on `EGL_PLATFORM_SURFACELESS_MESA`;
+  `DS_DUMP_FRAMES=N` saves every Nth frame to `build/frames/`. The R36S build puts an SDL2/KMSDRM
+  surface on the Mali GPU in its place.
+- **USER32 + GDI32** ([ds_user32.c](src/runtime/ds_user32.c)): a headless fake window, one fixed
+  640×480 client rect (the R36S screen), one display mode and monitor, an empty message queue.
+- **File I/O** ([ds_file.c](src/runtime/ds_file.c)): the guest's `Z:\dontstarve\…` maps to
+  `$DS_GAME_DIR` (default `gamedata/`: your install's `bin/` and `data/`), `Z:\home\…` to
+  `$DS_HOME_DIR` (default `build/home/`: saves, `log.txt`). Lookups are case-insensitive, as on
+  Windows. `DS_FILE_TRACE=1` logs every open.
+- **Threads** ([ds_thread.c](src/runtime/ds_thread.c)): real host threads. The machine lock is
+  released around blocking calls, and threads, mutexes and semaphores are real waitable objects.
+- **Input** ([ds_input.c](src/runtime/ds_input.c)): XInput reports no pad; DirectInput 8 is a COM
+  interface with no devices (the game calls it without checking the create result).
+- **Offline Winsock** ([ds_net.c](src/runtime/ds_net.c)): `WSAStartup` works, but no socket or
+  name lookup succeeds.
+- **Lifter:** patch [0016](patches/pcrecomp) adds the x87 `fcomi`/`fucomi[p]` compares (3,835
+  sites in the exe that lifted to `RECOMP_UNIMPL` because Capstone spells them `fcompi`/`fucompi`),
+  with their real EFLAGS (NaN included). pcrecomp's `difftest` matches hardware on 263/263 cases.
+
+Help wanted, in order:
+
+- **FMOD Ex + FMOD Event shim** (21 + 24 imports, C API and stdcall C++ methods): a silent
+  bring-up first (valid handles, no sound), then a real backend (SDL audio, FSB banks).
+- **SDL2/KMSDRM** behind the window and the EGL surface, SDL events → the message queue, and
+  SDL GameController → XInput for the R36S buttons.
+
+Runtime fixes on the way (useful for anyone using pcrecomp): import-stub names were dangling
+pointers (`GetProcAddress` stack buffers and ordinal names like `OLEAUT32.dll#9`), so a missing
+import reported an empty or wrong name. `HeapSize` returned 0, so the CRT's `_msize`-sized onexit
+table walked into string data at exit. Heap blocks now carry a size header.
 
 How the CRT wall fell (for anyone hitting similar walls with pcrecomp): kernel32
 `DecodePointer` shared a cdecl shim and didn't pop its argument, shifting `pop esi/pop ebp` in
@@ -88,7 +122,8 @@ Ideas, PRs and discussion very welcome — see [docs/01-ARCHITECTURE.md](docs/01
 
 ### Reproducing (you need your own game copy)
 
-Requirements: Windows + WSL (gcc), Python 3.10 with `capstone pefile unicorn keystone-engine`.
+Requirements: Linux (or Windows + WSL) with gcc, EGL + GLES2 dev libraries (Mesa: `libegl-dev libgles-dev`),
+Python 3.10+ with `capstone pefile unicorn keystone-engine`.
 
 ```bash
 # 1. pcrecomp, pinned + patched (patches from nfsu2-recompiled-r36s)
@@ -96,19 +131,23 @@ git clone https://github.com/sp00nznet/pcrecomp && cd pcrecomp
 git checkout 35548b8 && git am ../nfsu2-recompiled-r36s/patches/pcrecomp/*.patch
 git am ../patches/pcrecomp/*.patch && cd ..   # this repo's own lifter fixes (0015+)
 
-# 2. Put YOUR dontstarve_steam.exe in work/, and msvcr90.dll + msvcp90.dll
-#    (x86, 9.0.30729.x — from your Windows WinSxS or the game's vcredist)
+# 2. Put YOUR DRM-free dontstarve.exe (the standalone build, from bin/) in work/, plus
+#    msvcr90.dll + msvcp90.dll (x86, 9.0.30729.x, from Windows WinSxS or a vcredist).
+#    The Steam build (dontstarve_steam.exe) needs a running Steam client and won't start.
 
-# 3. Lift (Windows Python) — see scripts/
-python scripts/run_lift.py catalog work/dontstarve_steam.exe work/seeds_all.json work/catalog.json
-python scripts/run_lift.py lift    work/dontstarve_steam.exe work/catalog.json src/recomp/gen
+# 3. Lift — see scripts/
+python pcrecomp/tools/cpp/vtable_scan.py work/dontstarve.exe --seeds work/vtable_seeds.json
+python pcrecomp/tools/cpp/rtti.py        work/dontstarve.exe --seeds work/rtti_seeds.json
+#    merge both into work/seeds_all.json (a JSON list, dedup by "address")
+python scripts/run_lift.py catalog work/dontstarve.exe work/seeds_all.json work/catalog.json
+python scripts/run_lift.py lift    work/dontstarve.exe work/catalog.json src/recomp/gen
 bash   scripts/lift_dll.sh work/msvcr90.dll msvcr90_
 bash   scripts/lift_dll.sh work/msvcp90.dll msvcp90_
 python scripts/find_data_funcs.py work/msvcr90.dll work/msvcr90_catalog.json config/exclude.txt
 python scripts/find_data_funcs.py work/msvcp90.dll work/msvcp90_catalog.json config/exclude.txt
 #    then re-run the two DLL lifts so the exclude list applies (lift_dll.sh also adds reloc seeds)
 
-# 4. Build + run the host (WSL)
+# 4. Build + run the host (game data: DS_GAME_DIR=<your install dir>, default gamedata/)
 bash scripts/build_guest_obj.sh && bash scripts/build_arena_host.sh
 ./build/dontstarve_host --run-entry
 ```
@@ -129,7 +168,7 @@ tudo que o port Android perde: todas as DLCs (RoG, Shipwrecked, Hamlet), **mods*
 
 ### Como funciona
 
-1. O `dontstarve_steam.exe` de Windows (x86-32 PE, VC9) é desmontado e liftado para C99.
+1. O `dontstarve.exe` **standalone DRM-free** de Windows (x86-32 PE, VC9) é desmontado e liftado para C99.
    *(o pcrecomp não tem front-end ELF — o "caminho 64-bit" dele é Win64 PE — então a build Linux não serve.)*
 2. O **runtime C/C++ do VC9** (`msvcr90.dll`, `msvcp90.dll`) **também é liftado**, então a STL e
    o CRT rodam como código guest com o ABI exato — sem shims de `std::string` escritos à mão.
@@ -146,7 +185,7 @@ tudo que o port Android perde: todas as DLCs (RoG, Shipwrecked, Hamlet), **mods*
 **Quanto do jogo realmente roda.** Todas as funções já estão *liftadas* para C — essa é a parte
 fácil. O que importa é quantas já **executaram** nativamente sem crashar. Cada célula ≈ 16 funções:
 **clara = rodou em runtime**, escura = liftada mas ainda não alcançada. Hoje a execução passa pelo
-startup do CRT e entra no `main()` do jogo, parando nas primeiras chamadas de janela do Win32. O mapa
+startup do CRT e pela inicialização do jogo, cria a janela do jogo e um contexto GLES2 de verdade, e para na primeira chamada ao FMOD (áudio). O mapa
 vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, veja `scripts/coverage_counts.py`).
 
 ![mapa de progresso](docs/progress-pt.svg)
@@ -156,27 +195,64 @@ vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, ve
 | Marco | Status |
 |---|---|
 | M0 Decisão de input + toolchain | ✅ feito |
-| M1 Catálogo de funções — 17.033 funções | ✅ feito |
+| M1 Catálogo de funções — 16.146 funções (exe standalone) | ✅ feito |
 | M2 Lift para C99 — 4,2M linhas, **0 falhas** | ✅ feito |
 | M3 Compila + linka (exe + 2 DLLs do CRT liftadas) | ✅ feito |
 | M4 Host arena, bind da IAT (955/955), `DllMain` do CRT roda | ✅ feito |
 | M5 Inicialização do CRT — `DllMain` dos 2 CRTs + startup do exe, `main()` do jogo roda | ✅ feito |
-| **M6 Menu principal nativo** | 🟡 **em progresso — janela Win32 + contexto GLES2** |
+| **M6 Menu principal nativo** | 🟡 **em progresso — janela + ponte EGL/GLES2 prontas; FMOD (mudo) a seguir** |
 | M7 Estabilidade | ⬜ |
 | M8 Áudio (shim do FMOD Ex) | ⬜ |
 | M9 Pacote PortMaster + FPS vs box64 | ⬜ |
 
 ### 🙋 Onde precisamos de ajuda
 
-O CRT VC9 recompilado agora inicializa por completo e o `main()` do próprio jogo roda:
-**630 funções executadas, 262 delas no exe do jogo**. Ele já imprime a primeira linha (uma
-consulta WMI de hardware que falha — inofensiva). Cada import faltando para a execução com o
-próprio nome, então o ciclo é: escrever o shim, rebuildar, rodar de novo. Próximos passos:
+**Parede atual: `FMOD_EventSystem_Create`, a primeira chamada de áudio.** O port lifta o **build
+standalone DRM-free** do jogo (`dontstarve.exe`, 16.146 funções, 0 falhas de lift); o build Steam
+não inicia sem o cliente da Steam rodando. A execução chega a **1.335 funções (787 no exe do
+jogo)**. O jogo escreve o próprio `log.txt`, procura as pastas de DLC/patch e as configurações,
+cria a janela `"opengles2.0"`, sobe **EGL + GLES2 de verdade** (no driver nativo do host; Mesa
+llvmpipe nos testes headless), consulta os formatos de textura do GL, enumera os dispositivos de
+input, chega ao `cDontStarveGame::DoGameSpecificInitialize()` e cria o event system do FMOD.
 
-- **USER32 / GDI32** — janela, message pump, cursor, modos de vídeo (planejado sobre SDL2/KMSDRM).
-- **libEGL / libGLESv2** (importados por ordinal, ANGLE) → ponte para GLES2 nativo na GPU Mali.
-- Shim da API **FMOD Ex + FMOD Event**; **XINPUT/DINPUT8** → SDL2 game controller; I/O de
-  arquivos mapeado para o diretório de dados do jogo.
+O que já existe no runtime ([src/runtime](src/runtime)):
+
+- **Ponte EGL/GLES2** ([ds_gles.c](src/runtime/ds_gles.c)): os 9 imports EGL + 76 GLES2 do ANGLE
+  (por ordinal, mapeados a partir das tabelas de export do `libEGL.dll`/`libGLESv2.dll` do próprio
+  jogo) direto para EGL/GLES2 nativo. Por enquanto headless: um pbuffer de 640×480 em
+  `EGL_PLATFORM_SURFACELESS_MESA`; `DS_DUMP_FRAMES=N` salva cada N-ésimo frame em `build/frames/`.
+  No R36S entra uma superfície SDL2/KMSDRM na GPU Mali no lugar.
+- **USER32 + GDI32** ([ds_user32.c](src/runtime/ds_user32.c)): uma janela falsa headless, um
+  retângulo cliente fixo de 640×480 (a tela do R36S), um modo de vídeo e um monitor, fila de
+  mensagens vazia.
+- **I/O de arquivos** ([ds_file.c](src/runtime/ds_file.c)): o `Z:\dontstarve\…` do guest vira
+  `$DS_GAME_DIR` (padrão `gamedata/`: o `bin/` e o `data/` da sua instalação), e `Z:\home\…` vira
+  `$DS_HOME_DIR` (padrão `build/home/`: saves, `log.txt`). A busca ignora maiúsculas/minúsculas,
+  como no Windows. `DS_FILE_TRACE=1` registra cada abertura.
+- **Threads** ([ds_thread.c](src/runtime/ds_thread.c)): threads reais do host. A trava da
+  máquina é liberada nas chamadas que bloqueiam, e threads, mutexes e semáforos são objetos de
+  espera de verdade.
+- **Input** ([ds_input.c](src/runtime/ds_input.c)): o XInput responde que não há controle; o
+  DirectInput 8 é uma interface COM sem dispositivos (o jogo a usa sem checar o resultado).
+- **Winsock offline** ([ds_net.c](src/runtime/ds_net.c)): o `WSAStartup` funciona, mas nenhum
+  socket ou resolução de nome dá certo.
+- **Lifter:** o patch [0016](patches/pcrecomp) adiciona as comparações x87 `fcomi`/`fucomi[p]`
+  (3.835 pontos no exe que viravam `RECOMP_UNIMPL` porque o Capstone as chama de
+  `fcompi`/`fucompi`), com os EFLAGS reais (NaN incluído). O `difftest` do pcrecomp bate com o
+  hardware em 263/263 casos.
+
+Procura-se ajuda, nesta ordem:
+
+- **Shim do FMOD Ex + FMOD Event** (21 + 24 imports, API C e métodos C++ stdcall): primeiro sem
+  som (handles válidos, nada toca), depois um backend real (áudio SDL, bancos FSB).
+- **SDL2/KMSDRM** por trás da janela e da superfície EGL, eventos SDL → fila de mensagens, e SDL
+  GameController → XInput para os botões do R36S.
+
+Correções de runtime no caminho (úteis para quem usa o pcrecomp): os nomes dos stubs de import
+eram ponteiros pendurados (buffers de pilha do `GetProcAddress` e nomes por ordinal como
+`OLEAUT32.dll#9`), então um import faltando aparecia com nome vazio ou errado. O `HeapSize`
+retornava 0, e a tabela onexit do CRT (dimensionada por `_msize`) andava por dados de string na
+saída. Agora os blocos do heap têm um cabeçalho com o tamanho.
 
 Como a parede do CRT caiu (para quem bater em paredes parecidas com o pcrecomp): o
 `DecodePointer` do kernel32 usava um shim cdecl e não desempilhava o argumento, deslocando o
@@ -191,7 +267,9 @@ Ideias, PRs e discussão são muito bem-vindos — veja [docs/01-ARCHITECTURE.md
 
 ### Reproduzindo (precisa da sua cópia do jogo)
 
-Requisitos: Windows + WSL (gcc), Python 3.10 com `capstone pefile unicorn keystone-engine`.
+Requisitos: Linux (ou Windows + WSL) com gcc, bibliotecas dev de EGL + GLES2 (Mesa: `libegl-dev libgles-dev`),
+Python 3.10+ com `capstone pefile unicorn keystone-engine`.
+Use o seu `dontstarve.exe` **standalone DRM-free** (o build Steam exige o cliente da Steam rodando).
 Os comandos são os mesmos da seção em inglês acima.
 
 ---
@@ -202,7 +280,10 @@ Os comandos são os mesmos da seção em inglês acima.
 docs/          design decisions, architecture, status page (index.html)
 scripts/       lift + build drivers (run_lift.py, lift_dll.sh, find_data_funcs.py, build_*.sh, gen_status.py)
 src/runtime/   arena host (ds_host.c), shim ABI (ds_hle.h), kernel32/CRT shims (ds_kernel32.c),
-               platform shims: winmm, steam_api, COM, shell32 (ds_win32.c)
+               platform shims: winmm, steam_api, COM, shell32 (ds_win32.c),
+               USER32 + GDI32 headless window (ds_user32.c), file I/O (ds_file.c),
+               threads + waitable objects (ds_thread.c), offline Winsock (ds_net.c),
+               EGL/GLES2 bridge (ds_gles.c), XInput + DirectInput8 (ds_input.c)
 patches/       this repo's pcrecomp lifter fixes, applied on top of a847ef6
 config/        overrides.txt (native HLE of CRT EH helpers), hooks.txt
 ```

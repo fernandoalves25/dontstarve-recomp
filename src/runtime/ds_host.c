@@ -68,7 +68,32 @@ static void sentinel_report(uint32_t va) {
     }
     _exit(3);
 }
+/* DS_WATCH=va[,va...]: print the first stack arguments of each watched lifted
+ * function on entry (as text when an argument points at a printable string).
+ * Finding Lua's error functions and watching them is how a script error with
+ * no message gets its message back. */
+static uint32_t g_watch[16]; static int g_watch_n = -1;
+static void watch_report(uint32_t va) {
+    fprintf(stderr, "[watch] 0x%08X(", va);
+    for (int i = 1; i <= 4; i++) {
+        uint32_t a = MEM32(g_esp + 4u * (uint32_t)i);
+        int str = a >= 0x10000u && a < 0x7F000000u;
+        for (int k = 0; str && k < 4; k++) { uint8_t c = MEM8(a + (uint32_t)k); if (!c) { str = k > 0; break; } if (c < 0x20 || c > 0x7E) str = 0; }
+        if (str) fprintf(stderr, "%s\"%.200s\"", i > 1 ? ", " : "", (const char *)ds_hostptr(a));
+        else fprintf(stderr, "%s0x%08X", i > 1 ? ", " : "", a);
+    }
+    fprintf(stderr, ")\n");
+}
 void recomp_trace_enter(uint32_t va) {
+    if (g_watch_n < 0) {
+        g_watch_n = 0;
+        for (const char *e = getenv("DS_WATCH"); e && *e && g_watch_n < 16; ) {
+            char *end; g_watch[g_watch_n++] = (uint32_t)strtoul(e, &end, 16);
+            e = (*end == ',') ? end + 1 : end;
+            if (end == e && *e != ',') break;
+        }
+    }
+    for (int i = 0; i < g_watch_n; i++) if (g_watch[i] == va) watch_report(va);
     uint32_t k = g_enter_idx & (RECOMP_ENTER_SIZE - 1);
     g_enter_esp[k] = g_esp; g_enter_ebp[k] = g_ebp;
     g_enter_trace[g_enter_idx++ & (RECOMP_ENTER_SIZE - 1)] = va;
@@ -203,6 +228,51 @@ void mach_leave(void) {
     if (--g_ms.depth == 0) regs_save(&g_ms.r);
     pthread_mutex_unlock(&g_mach);
 }
+/* A shim about to block (Sleep, a wait, a contended lock) lets the other guest
+ * threads run: save this thread's registers, drop every level of the machine
+ * lock, and take it all back afterwards. The shim must read its arguments
+ * BEFORE ds_block_begin (g_esp belongs to whoever runs meanwhile) and RET
+ * only after ds_block_end. */
+int ds_block_begin(void) {
+    int d = g_ms.depth;
+    regs_save(&g_ms.r);
+    g_ms.depth = 0;
+    for (int i = 0; i < d; i++) pthread_mutex_unlock(&g_mach);
+    return d;
+}
+void ds_block_end(int d) {
+    for (int i = 0; i < d; i++) pthread_mutex_lock(&g_mach);
+    g_ms.depth = d;
+    regs_load(&g_ms.r);
+}
+
+/* ============================================================ setjmp/longjmp
+ * Real non-local jumps for the guest (RECOMP_HOST_SETJMP in recomp_types.h):
+ * a call to msvcr90's _setjmp/_setjmp3 runs the host setjmp in the lifted
+ * caller's frame, and msvcr90's longjmp (a manual override) jumps back to it,
+ * unwinding the host C frames in between -- Lua's pcall/error. The record is
+ * keyed by the guest jmp_buf VA. If the jump crosses an hle_call_guest, the
+ * machine lock is released down to the depth the setjmp saw. */
+#define MAX_JMP 256
+static struct { uint32_t va; recomp_jmp_t j; } g_jmp[MAX_JMP];
+static int g_jmp_n;
+recomp_jmp_t *recomp_jmp_slot(uint32_t va) {
+    for (int i = 0; i < g_jmp_n; i++) if (g_jmp[i].va == va) return &g_jmp[i].j;
+    if (g_jmp_n >= MAX_JMP) ds_fatal("too many live jmp_bufs");
+    g_jmp[g_jmp_n].va = va;
+    return &g_jmp[g_jmp_n++].j;
+}
+int recomp_is_setjmp(uint32_t va) { return va == 0x785926F0u /* _setjmp3 */ || va == 0x785926B0u /* _setjmp */; }
+int recomp_jmp_depth(void) { return g_ms.depth; }
+static void ds_longjmp(void) {                 /* msvcr90 longjmp(jmp_buf, int) */
+    uint32_t va = MEM32(g_esp + 4), val = MEM32(g_esp + 8);
+    recomp_jmp_t *j = NULL;
+    for (int i = 0; i < g_jmp_n; i++) if (g_jmp[i].va == va) { j = &g_jmp[i].j; break; }
+    if (!j) ds_fatal("longjmp to jmp_buf 0x%08X that no setjmp filled (from 0x%08X)", va, g_cur_func);
+    j->val = val ? val : 1;
+    while (g_ms.depth > j->depth) { g_ms.depth--; pthread_mutex_unlock(&g_mach); }
+    longjmp(j->host, 1);
+}
 
 /* ============================================================ dispatch
  * The exe and each lifted DLL (msvcr90, msvcp90) have their own dispatch table,
@@ -294,6 +364,19 @@ static void ds_seh_prolog4(void) {
     g_eax = 0;
 }
 
+/* Native memcpy/memmove (msvcr90 0x7855AE20 / 0x7855B310). The VC9 versions are
+ * hand-written asm that jumps into tables of tail-copy labels (`jmp [edx*4 +
+ * TrailUp]`): those targets are not functions, so the lifted body hit an
+ * unresolved ITAIL inside its first big copy. cdecl (dst, src, n) -> dst; VC9's
+ * memcpy also tolerates overlap, so both are memmove. Only the return address
+ * is popped. */
+static void ds_memmove(void) {
+    uint32_t d = MEM32(g_esp + 4), s = MEM32(g_esp + 8), n = MEM32(g_esp + 12);
+    if (n) memmove(ds_hostptr(d), ds_hostptr(s), n);
+    g_eax = d;
+    g_esp += 4;
+}
+
 /* ============================================================ shim registry */
 #define SHIM_BASE 0x7F000000u
 #define SHIM_STEP 16u
@@ -301,6 +384,7 @@ static void ds_seh_prolog4(void) {
 static struct { const char *name; recomp_func_t fn; uint32_t va; } g_shim[MAX_SHIMS];
 static int g_shim_n;
 static uint32_t g_last_import_va;
+uint32_t ds_last_import_va(void) { return g_last_import_va; }   /* the shim VA being run */
 
 int ds_register(const ds_shim *shims) {
     int added = 0;
@@ -330,7 +414,8 @@ uint32_t ds_resolve_or_stub(const char *name) {
     uint32_t va = ds_resolve(name);
     if (va) return va;
     if (g_shim_n >= MAX_SHIMS) ds_fatal("too many shims");
-    g_shim[g_shim_n].name = name;   /* IAT name strings live in the arena for the run */
+    /* copy: a GetProcAddress name may sit in a guest stack buffer that is reused */
+    g_shim[g_shim_n].name = strdup(name);
     g_shim[g_shim_n].fn   = ds_unimplemented_import;
     g_shim[g_shim_n].va   = SHIM_BASE + SHIM_STEP * (uint32_t)g_shim_n;
     return g_shim[g_shim_n++].va;
@@ -542,7 +627,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--trace")) ds_trace = 1;
         else if (argv[i][0] != '-') exe = argv[i];
     }
-    if (!exe) exe = "work/dontstarve_steam.exe";
+    if (!exe) exe = "work/dontstarve.exe";
     if (getenv("DS_HLE_TRACE")) ds_trace = 1;
     g_permissive = permissive;
 
@@ -560,6 +645,9 @@ int main(int argc, char **argv) {
     ds_host_init();
     ds_register_manual(0x7857DF6Cu, ds_eh_prolog);     /* msvcr90 __EH_prolog */
     ds_register_manual(0x7858CF00u, ds_seh_prolog4);   /* msvcr90 _SEH_prolog4 */
+    ds_register_manual(0x7855AE20u, ds_memmove);       /* msvcr90 memcpy */
+    ds_register_manual(0x7855B310u, ds_memmove);       /* msvcr90 memmove */
+    ds_register_manual(0x785947D8u, ds_longjmp);       /* msvcr90 longjmp */
     fprintf(stderr, "[ds] registered %d HLE shims; lifted DLLs: msvcr90=%d msvcp90=%d\n",
             g_shim_n, have_r, have_p);
 
