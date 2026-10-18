@@ -10,7 +10,7 @@ echo "start: $(date +%T)"
 ls src/recomp/gen/*.c | xargs -P 8 -I FILE sh -c \
   'gcc -c -O0 -w -fwrapv -fno-strict-aliasing -fexceptions \
    -I pcrecomp/runtime/recomp32 -I src/recomp/gen \
-   -DRECOMP_STRICT_ICALL -DRECOMP_LOCAL_REGS -DRECOMP_X87_WINDOW -DRECOMP_MEM_QUAL= \
+   -DRECOMP_STRICT_ICALL -DRECOMP_LOCAL_REGS -DRECOMP_MEM_QUAL= \
    "FILE" -o "build/obj/$(basename "FILE" .c).o" 2>>build/compile_errors.log \
    || echo "FAIL: FILE" >>build/compile_errors.log'
 echo "done: $(date +%T)"
