@@ -74,7 +74,10 @@ the game's own `.fev` project files (2,300+ events → sound definitions → wav
 of the 50 FSB5 banks (7,571 Vorbis streams) through an SDL mixer with 32 voices and 3D
 pan/attenuation from the listener. FSB5 strips the Vorbis setup headers; the host rebuilds them with
 libvorbis's own encoder and checks each against the bank's CRC32 (cached in
-`$DS_HOME_DIR/vorbis_setups.bin`). Menu music, footsteps, rabbits, birds, HUD clicks all play. The
+`$DS_HOME_DIR/vorbis_setups.bin`). The low-rate (8–24 kHz) setups came out of another encoder
+build; [tools/audio/import_setups.py](tools/audio/import_setups.py) takes them from
+[python-fsb5](https://github.com/HearthSim/python-fsb5)'s table (MIT) — then **all 7,571 waves
+decode** (`DS_AUDIO_CHECK=1` decodes each once and reports). Menu music, footsteps, rabbits, birds, HUD clicks all play. The
 aarch64 build links the audio too (libvorbis/libogg/zlib static, still glibc 2.17) and plays the menu
 music under qemu.
 
@@ -129,8 +132,9 @@ Help wanted, in order:
 
 - **On a real R36S:** the SDL2 backend over KMSDRM on the Mali GPU (written, tested with SDL's
   offscreen driver), the aarch64 build in a glibc ≤ 2.30 image for ArkOS, and FPS against box64.
-- **The last Vorbis setups:** 6 of the 20 setup headers (low sample rates, 8–24 kHz) don't match
-  any encoder setting tried yet, so those waves stay silent.
+- **Regenerating the low-rate Vorbis setups ourselves:** 6 of the 20 setup headers (8–24 kHz) match
+  no libvorbis 1.3.x VBR setting tried (every rate 4–52 kHz × quality −0.1…1.0); for now they
+  come from python-fsb5's table.
 - **Complex FMOD events:** event parameters drive which layer plays (day/night ambience, music
   intensity); the host plays the first layer of each.
 - **Long play sessions:** days, nights, seasons, saving and loading.
@@ -253,7 +257,10 @@ sob o cursor) — **5.212 funções executadas (4.521 no exe do jogo)**, código
 definições de som → ondas), toca as ondas dos 50 bancos FSB5 (7.571 streams Vorbis) num mixer SDL
 de 32 vozes com pan/atenuação 3D a partir do ouvinte. O FSB5 remove os cabeçalhos de setup do
 Vorbis; o host os reconstrói com o próprio encoder da libvorbis e confere cada um contra o CRC32 do
-banco (cache em `$DS_HOME_DIR/vorbis_setups.bin`). Música do menu, passos, coelhos, pássaros e
+banco (cache em `$DS_HOME_DIR/vorbis_setups.bin`). Os setups de taxa baixa (8–24 kHz) vieram de outro
+build do encoder; o [tools/audio/import_setups.py](tools/audio/import_setups.py) os pega da tabela
+do [python-fsb5](https://github.com/HearthSim/python-fsb5) (MIT) — aí **as 7.571 ondas
+decodificam** (`DS_AUDIO_CHECK=1` decodifica cada uma uma vez e informa). Música do menu, passos, coelhos, pássaros e
 cliques do HUD tocam. O build aarch64 também linka o áudio (libvorbis/libogg/zlib estáticas, ainda
 glibc 2.17) e toca a música do menu sob qemu.
 
@@ -312,8 +319,9 @@ Procura-se ajuda, nesta ordem:
 
 - **Num R36S de verdade:** o backend SDL2 sobre KMSDRM na GPU Mali (escrito, testado com o driver
   offscreen do SDL), o build aarch64 numa imagem com glibc ≤ 2.30 para o ArkOS, e FPS comparado ao box64.
-- **Os últimos setups Vorbis:** 6 dos 20 cabeçalhos de setup (taxas baixas, 8–24 kHz) ainda não
-  batem com nenhuma configuração do encoder testada, então essas ondas ficam mudas.
+- **Regenerar nós mesmos os setups Vorbis de taxa baixa:** 6 dos 20 cabeçalhos (8–24 kHz) não batem
+  com nenhuma configuração VBR da libvorbis 1.3.x testada (toda taxa de 4–52 kHz × qualidade
+  −0,1…1,0); por enquanto vêm da tabela do python-fsb5.
 - **Eventos FMOD complexos:** os parâmetros do evento escolhem a camada que toca (ambiente de
   dia/noite, intensidade da música); o host toca a primeira camada de cada um.
 - **Sessões longas de jogo:** dias, noites, estações, salvar e carregar.

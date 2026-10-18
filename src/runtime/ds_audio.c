@@ -485,6 +485,16 @@ static int audio_on(void) {
     g_audio_on = 1;
     fprintf(stderr, "[audio] SDL audio %d Hz stereo (%s)\n", have.freq, SDL_GetCurrentAudioDriver());
 #endif
+    if (g_audio_on && getenv("DS_AUDIO_CHECK")) {             /* decode every wave once */
+        if (!g_indexed) { build_index(); load_fevs(); }
+        int bad = 0;
+        for (int i = 0; i < g_nwaves; i++) {
+            wave *w = &g_waves[i];
+            if (!decode(w)) { if (bad++ < 8) fprintf(stderr, "[audio] check: %s does not decode\n", w->name); continue; }
+            free(w->pcm); w->pcm = NULL; w->frames = 0;
+        }
+        fprintf(stderr, "[audio] check: %d of %d waves decode\n", g_nwaves - bad, g_nwaves);
+    }
     return g_audio_on;
 }
 
