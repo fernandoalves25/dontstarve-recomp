@@ -107,6 +107,156 @@ static void build_index(void) {
     fprintf(stderr, "[audio] indexed %d waves in %d banks\n", g_nwaves, g_nbanks);
 }
 
+/* ===================== FEV: event -> sound definitions -> waves
+ * The LGCY chunk of each .fev (see tools/audio/fev.py for the layout):
+ * banks, a category tree, the event group tree, and the sound definition
+ * table. An event is a path ("dontstarve/bee/bee_takeoff"); its sound
+ * definitions list weighted waves (FEV bank index + wave index in that FSB). */
+typedef struct { uint16_t bank, idx, weight; } fev_ent;          /* bank: our g_banks index */
+typedef struct { int n; fev_ent *e; } fev_def;
+typedef struct { char *path; int ndefs; int defs[8]; int fev; } fev_event;
+static fev_def *g_defs[8]; static int g_ndefs[8];               /* per .fev */
+static fev_event *g_events; static int g_nevents;
+typedef struct { const uint8_t *b; size_t n, p; int bad; } rd;
+static uint32_t r32(rd *r) { if (r->p + 4 > r->n) { r->bad = 1; return 0; } uint32_t v; memcpy(&v, r->b + r->p, 4); r->p += 4; return v; }
+static const char *rstr(rd *r, uint32_t *len) {
+    uint32_t n = r32(r); if (r->bad || r->p + n > r->n) { r->bad = 1; return ""; }
+    const char *s = (const char *)r->b + r->p; r->p += n; if (len) *len = n; return s;
+}
+static int bank_by_name(const char *nm) {                       /* FEV bank name -> our FSB */
+    for (int i = 0; i < g_nbanks; i++) {
+        const char *f = strrchr(g_banks[i].path, '/'); f = f ? f + 1 : g_banks[i].path;
+        size_t l = strlen(nm);
+        if (!strncasecmp(f, nm, l) && !strcasecmp(f + l, ".fsb")) return i;
+    }
+    return -1;
+}
+static void read_cats(rd *r, char *prefix, int depth, char ***paths, int *np) {
+    uint32_t l; const char *nm = rstr(r, &l); r32(r); r32(r); r32(r); r32(r); uint32_t n = r32(r);
+    char path[256];
+    if (depth == 0) snprintf(path, sizeof path, "%s", nm); else if (depth == 1) snprintf(path, sizeof path, "%s", nm);
+    else snprintf(path, sizeof path, "%s/%s", prefix, nm);
+    *paths = (char **)realloc(*paths, sizeof(char *) * (size_t)(*np + 1)); (*paths)[(*np)++] = strdup(path);
+    for (uint32_t i = 0; i < n && !r->bad && i < 256; i++) read_cats(r, depth == 0 ? (char *)"" : path, depth + 1, paths, np);
+}
+static void load_fev(const uint8_t *d, size_t n) {
+    if (n < 12 || memcmp(d, "RIFF", 4) || g_nevents < 0) return;
+    const uint8_t *lg = NULL, *sr = NULL; size_t lgn = 0, srn = 0;
+    for (size_t off = 12; off + 8 <= n; ) {                     /* RIFF 'FEV ', LIST 'PROJ' */
+        uint32_t sz; memcpy(&sz, d + off + 4, 4);
+        if (!memcmp(d + off, "LIST", 4)) { off += 12; continue; }
+        if (!memcmp(d + off, "LGCY", 4)) { lg = d + off + 8; lgn = sz; }
+        if (!memcmp(d + off, "STRR", 4)) { sr = d + off + 8; srn = sz; }
+        off += 8 + sz + (sz & 1);
+    }
+    if (!lg || !sr || srn < 4) return;
+    uint32_t ns; memcpy(&ns, sr, 4);
+    const char **S = (const char **)calloc(ns, sizeof *S);
+    for (uint32_t i = 0; i < ns; i++) { uint32_t o; memcpy(&o, sr + 4 + 4 * i, 4); S[i] = (const char *)sr + 4 + 4 * ns + o; }
+    int fi = 0; while (fi < 8 && g_defs[fi]) fi++;
+    if (fi >= 8) { free(S); return; }
+    rd r = { lg, lgn, 0, 0 };
+    r32(&r); r32(&r); uint32_t pl; const char *proj = rstr(&r, &pl);
+    uint32_t nb = r32(&r); r32(&r);
+    int bankmap[128];
+    for (uint32_t i = 0; i < nb && !r.bad; i++) {
+        r32(&r); r32(&r); r32(&r); r32(&r); r32(&r);
+        const char *bn = rstr(&r, NULL);
+        if (i < 128) bankmap[i] = bank_by_name(bn);
+    }
+    char **cats = NULL; int ncats = 0; read_cats(&r, (char *)"", 0, &cats, &ncats);
+    size_t groups_at = r.p;
+    /* the sound definition table: u32 count, then records whose first name is
+     * the first "/..." string; validate by reading it through */
+    uint32_t first = 0; while (first < ns && S[first][0] != '/') first++;
+    size_t defs_at = 0; fev_def *defs = NULL; uint32_t ndefs = 0;
+    for (size_t q = lgn >= 8 ? lgn - 8 : 0; q > groups_at && !defs; q--) {
+        uint32_t v; memcpy(&v, lg + q, 4); if (v != first) continue;
+        rd t = { lg, lgn, q - 4, 0 }; uint32_t cnt = r32(&t);
+        if (!cnt || cnt > 100000) continue;
+        fev_def *dd = (fev_def *)calloc(cnt, sizeof *dd);
+        for (uint32_t k = 0; k < cnt && !t.bad; k++) {
+            uint32_t nm = r32(&t); r32(&t); uint32_t ne = r32(&t);
+            if (nm >= ns || ne > 10000) { t.bad = 1; break; }
+            dd[k].e = (fev_ent *)calloc(ne ? ne : 1, sizeof(fev_ent));
+            for (uint32_t e = 0; e < ne && !t.bad; e++) {
+                uint32_t ty = r32(&t), w = r32(&t);
+                if (ty == 0) {
+                    rstr(&t, NULL); uint32_t bk = r32(&t), ix = r32(&t); r32(&t);
+                    if (bk < 128 && bankmap[bk] >= 0) { fev_ent *x = &dd[k].e[dd[k].n++]; x->bank = (uint16_t)bankmap[bk]; x->idx = (uint16_t)ix; x->weight = (uint16_t)w; }
+                } else if (ty != 2 && ty != 3) t.bad = 1;
+            }
+        }
+        if (t.bad) { for (uint32_t k = 0; k < cnt; k++) free(dd[k].e); free(dd); continue; }
+        defs = dd; ndefs = cnt; defs_at = q - 4;
+    }
+    if (!defs) { fprintf(stderr, "[audio] %s.fev: no sound definition table\n", proj); free(S); return; }
+    g_defs[fi] = defs; g_ndefs[fi] = (int)ndefs;
+    /* group/event tree; an event ends with its category path string */
+    r.p = groups_at;
+    struct { uint32_t left_sub, left_ev; char path[256]; } st[32]; int sp = 0;
+    uint32_t ng = r32(&r);
+    int nev0 = g_nevents;
+    for (uint32_t g = 0; g < ng && !r.bad; g++) {
+        /* iterative DFS over one top-level group */
+        sp = 0;
+        uint32_t nm = r32(&r), np = r32(&r), nsub = r32(&r), nev = r32(&r);
+        if (np || nm >= ns) { r.bad = 1; break; }
+        snprintf(st[0].path, sizeof st[0].path, "%s/%s", proj, S[nm]); st[0].left_sub = nsub; st[0].left_ev = nev; sp = 1;
+        while (sp > 0 && !r.bad) {
+            if (st[sp - 1].left_sub) {
+                st[sp - 1].left_sub--;
+                nm = r32(&r); np = r32(&r); nsub = r32(&r); nev = r32(&r);
+                if (np || nm >= ns || sp >= 32) { r.bad = 1; break; }
+                snprintf(st[sp].path, sizeof st[sp].path, "%s/%s", st[sp - 1].path, S[nm]);
+                st[sp].left_sub = nsub; st[sp].left_ev = nev; sp++;
+                continue;
+            }
+            if (st[sp - 1].left_ev) {
+                st[sp - 1].left_ev--;
+                size_t es = r.p; uint32_t ty = r32(&r), en = r32(&r);
+                if (en >= ns) { r.bad = 1; break; }
+                size_t end = 0, cl = 0;                     /* the closing category string: one forward scan */
+                for (size_t q = es + 8; q + 8 <= defs_at && !end; q++) {
+                    uint32_t v; memcpy(&v, lg + q, 4);
+                    if (v < 2 || v > 128) continue;
+                    for (int c = 0; c < ncats; c++)
+                        if (strlen(cats[c]) + 1 == v && q + 4 + v <= defs_at && !memcmp(lg + q + 4, cats[c], v)) { end = q; cl = 4 + v; break; }
+                }
+                if (!end) { r.bad = 1; break; }
+                fev_event *e;
+                g_events = (fev_event *)realloc(g_events, sizeof *g_events * (size_t)(g_nevents + 1));
+                e = &g_events[g_nevents++]; memset(e, 0, sizeof *e); e->fev = fi;
+                char path[320]; snprintf(path, sizeof path, "%s/%s", st[sp - 1].path, S[en]); e->path = strdup(path);
+                if (ty == 0x10) { uint16_t di; memcpy(&di, lg + es + 172, 2); if (di < ndefs) e->defs[e->ndefs++] = di; }
+                else for (size_t q = es + 8; q + 6 <= end && e->ndefs < 8; q++)
+                    if (!memcmp(lg + q, "\x01\x00\x01\x00", 4)) { uint16_t di; memcpy(&di, lg + q + 4, 2); if (di < ndefs) e->defs[e->ndefs++] = di; }
+                r.p = end + cl;
+                continue;
+            }
+            sp--;
+        }
+    }
+    fprintf(stderr, "[audio] %s.fev: %d events, %u sound definitions%s\n", proj, g_nevents - nev0, ndefs, r.bad ? " (tree cut short)" : "");
+    for (int c = 0; c < ncats; c++) free(cats[c]); free(cats); free(S);
+}
+static void load_fevs(void) {
+    char host[512]; ds_map_path("Z:\\dontstarve\\data\\sound", host, sizeof host);
+    DIR *dir = opendir(host); if (!dir) return;
+    struct dirent *e;
+    while ((e = readdir(dir))) {
+        size_t l = strlen(e->d_name);
+        if (l > 4 && !strcasecmp(e->d_name + l - 4, ".fev")) {
+            char p[1024]; snprintf(p, sizeof p, "%s/%s", host, e->d_name);
+            int fd = open(p, O_RDONLY); if (fd < 0) continue;
+            struct stat sb; if (fstat(fd, &sb)) { close(fd); continue; }
+            uint8_t *d = (uint8_t *)mmap(NULL, (size_t)sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);
+            if (d != MAP_FAILED) load_fev(d, (size_t)sb.st_size);   /* strings stay mapped (S[] points in) */
+        }
+    }
+    closedir(dir);
+}
+
 /* ===================== event name -> waves */
 static int name_match(const char *wave_name, const char *stem) {   /* stem or stem_N, any case */
     size_t n = strlen(stem);
@@ -117,21 +267,37 @@ static int name_match(const char *wave_name, const char *stem) {   /* stem or st
     for (r++; *r; r++) if (!isdigit((unsigned char)*r)) return 0;
     return 1;
 }
+static int wave_of(uint16_t bank, uint16_t idx) {               /* our wave index for (bank, index) */
+    for (int i = 0; i < g_nwaves; i++) if (g_waves[i].bank == bank) return i + idx < g_nwaves && g_waves[i + idx].bank == bank ? i + idx : -1;
+    return -1;
+}
 typedef struct { int n; int idx[24]; int loop; } evmap;
 static void map_event(const char *path, evmap *m) {
     m->n = 0; m->loop = 0;
-    if (!g_indexed) build_index();
+    if (!g_indexed) { build_index(); load_fevs(); }
+    for (int i = 0; i < g_nevents && m->n == 0; i++) {
+        if (strcasecmp(g_events[i].path, path)) continue;
+        /* the first sound definition: layer 0 (a complex event's others are
+         * other layers / parameter ranges, e.g. day vs night) */
+        fev_event *e = &g_events[i];
+        for (int k = 0; k < e->ndefs && m->n == 0; k++) {
+            fev_def *d = &g_defs[e->fev][e->defs[k]];
+            for (int j = 0; j < d->n && m->n < 24; j++) { int w = wave_of(d->e[j].bank, d->e[j].idx); if (w >= 0) m->idx[m->n++] = w; }
+        }
+    }
     char p[256]; snprintf(p, sizeof p, "%s", path);
     char *leaf = strrchr(p, '/'); if (!leaf) leaf = p; else *leaf++ = 0;
-    char *grp = strrchr(p, '/'); grp = grp ? grp + 1 : p;
-    char stems[3][160];
-    snprintf(stems[0], sizeof stems[0], "%s", leaf);
-    snprintf(stems[1], sizeof stems[1], "%s_%s", grp, leaf);
-    snprintf(stems[2], sizeof stems[2], "%s%s", grp, leaf);
-    for (int s = 0; s < 3 && m->n == 0; s++)
-        for (int i = 0; i < g_nwaves && m->n < 24; i++)
-            if (name_match(g_waves[i].name, stems[s])) m->idx[m->n++] = i;
-    m->loop = strstr(leaf, "LP") != NULL || strcasestr(leaf, "amb") != NULL || strcasestr(path, "music") != NULL;
+    if (m->n == 0) {                                            /* not in a .fev: by name */
+        char *grp = strrchr(p, '/'); grp = grp ? grp + 1 : p;
+        char stems[3][160];
+        snprintf(stems[0], sizeof stems[0], "%s", leaf);
+        snprintf(stems[1], sizeof stems[1], "%s_%s", grp, leaf);
+        snprintf(stems[2], sizeof stems[2], "%s%s", grp, leaf);
+        for (int s = 0; s < 3 && m->n == 0; s++)
+            for (int i = 0; i < g_nwaves && m->n < 24; i++)
+                if (name_match(g_waves[i].name, stems[s])) m->idx[m->n++] = i;
+    }
+    m->loop = strstr(leaf, "LP") != NULL || strcasestr(leaf, "amb") != NULL || strcasestr(path, "/music/") != NULL;
 }
 
 /* ===================== Vorbis headers (rebuilt with libvorbis's encoder) */
