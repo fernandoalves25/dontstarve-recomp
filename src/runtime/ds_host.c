@@ -51,8 +51,29 @@ uint32_t g_enter_idx;
 #define COV_CAP (1u << 17)
 static uint32_t g_cov[COV_CAP];
 static uint32_t g_cov_n;
+/* esp/ebp seen at each entry, parallel to g_enter_trace. DS_SENTINEL=1 aborts
+ * at the first entry whose esp or ebp holds the RECOMP_RETADDR sentinel and
+ * prints the recent entries -- pins a return-address leak to its function. */
+static uint32_t g_enter_esp[RECOMP_ENTER_SIZE], g_enter_ebp[RECOMP_ENTER_SIZE];
+static int g_sentinel_check = -1;
+#define IS_SENTINEL(v) (((v) & 0xFFFF0000u) == (RECOMP_RETADDR & 0xFFFF0000u))
+static void sentinel_report(uint32_t va) {
+    fprintf(stderr, "\n[ds] *** sentinel in esp/ebp on entry to 0x%08X (esp=%08X ebp=%08X) ***\n",
+            va, g_esp, g_ebp);
+    uint32_t n = g_enter_idx < 48 ? g_enter_idx : 48;
+    for (uint32_t i = g_enter_idx - n; i != g_enter_idx; i++) {
+        uint32_t k = i & (RECOMP_ENTER_SIZE - 1);
+        fprintf(stderr, "    #%-6u 0x%08X  esp=%08X ebp=%08X\n", i, g_enter_trace[k],
+                g_enter_esp[k], g_enter_ebp[k]);
+    }
+    _exit(3);
+}
 void recomp_trace_enter(uint32_t va) {
+    uint32_t k = g_enter_idx & (RECOMP_ENTER_SIZE - 1);
+    g_enter_esp[k] = g_esp; g_enter_ebp[k] = g_ebp;
     g_enter_trace[g_enter_idx++ & (RECOMP_ENTER_SIZE - 1)] = va;
+    if (g_sentinel_check < 0) { const char *e = getenv("DS_SENTINEL"); g_sentinel_check = e && *e == '1'; }
+    if (g_sentinel_check && (IS_SENTINEL(g_esp) || IS_SENTINEL(g_ebp))) sentinel_report(va);
     uint32_t h = (va * 2654435761u) & (COV_CAP - 1);
     while (g_cov[h]) { if (g_cov[h] == va) return; h = (h + 1) & (COV_CAP - 1); }
     if (g_cov_n < COV_CAP / 2) { g_cov[h] = va; g_cov_n++; }

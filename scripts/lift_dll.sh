@@ -20,6 +20,8 @@ if hasattr(pe, 'DIRECTORY_ENTRY_EXPORT'):
 json.dump(seeds, open(r'work/${name}_seeds.json','w'))
 print('  export seeds:', len(seeds))
 "
+# code pointers in data sections (CRT init tables, vtables): see reloc_seeds.py
+python scripts/reloc_seeds.py "$dll" "work/${name}_seeds.json"
 echo "=== $name: catalog ==="
 python scripts/run_lift.py catalog "$dll" "work/${name}_seeds.json" "work/${name}_catalog.json"
 echo "=== $name: lift (prefix $prefix) ==="

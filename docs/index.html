@@ -100,13 +100,13 @@ const T = {
    ["Lift to C99","4.2M lines, 0 failures"],
    ["Compiles + links","x86-64 host; exe + 2 lifted CRT DLLs in one binary"],
    ["Arena host + IAT + DllMain","2 GB arena; 955 imports resolved; CRT DllMain runs"],
-   ["CRT initialization","return address leaks into esp during C++ static init (current wall)"],
-   ["Native main menu","first playable milestone"],
+   ["CRT initialization","both CRT DllMains + exe CRT startup complete; game main() runs"],
+   ["Native main menu","first playable milestone (current: Win32 window + GLES2 context)"],
    ["Stability","close the ICALL loop enough to play"],
    ["Audio (FMOD Ex shim)","FSB5/Vorbis banks"],
    ["PortMaster package + FPS","vs the ~20–22 FPS box64 ceiling"]],
   hHelp:"Where the community can help",
-  help:"<b>Current wall: bring-up of the recompiled VC9 CRT.</b> The recompiled entry runs the CRT startup, but during C++ static initialization a <b>return-address sentinel leaks into <code>esp</code>/<code>ebp</code></b> inside CRT functions that do raw stack surgery, incompatible with the recomp call/ret model. Native HLE of <code>__EH_prolog</code> and <code>_SEH_prolog4</code> is done, but neither is the leak source. Debug tooling: a <b>gdb-free backtrace</b> in the crash handler (the recomp uses real C calls, so the host backtrace <i>is</i> the guest call chain).<br><br>Current backtrace: <code>DllMain → sub_78542B94 → sub_78562B86 → _setmbcp → crash (invalid esp)</code>. Wanted: the function that writes a stack value (the return address) back into <code>esp</code>/<code>ebp</code>.",
+  help:"<b>Current wall: the Win32 surface the game touches before its first frame.</b> The recompiled VC9 CRT now initializes completely (both DllMains, the exe CRT startup) and the game's own <code>main()</code> runs: 630 functions executed, 262 of them in the game exe. It already prints its first line (a failed WMI hardware query, harmless). The next imports are USER32 window management, then the ANGLE <code>libEGL</code>/<code>libGLESv2</code> bridge to native GLES2. Each missing import stops the run with its own name, so the loop is: add the shim, rebuild, rerun.<br><br>How the CRT wall fell: kernel32 <code>DecodePointer</code> shared a cdecl shim and did not pop its argument, which shifted <code>pop esi/pop ebp</code> in the CRT's <code>_decode_pointer</code> (the 0xDEAD0000 <code>this</code>); then lifter support for <code>lock xadd</code> and <code>rep ret</code>; then relocation-based seeds for CRT init tables that recursive descent never reaches. Help wanted: USER32/GDI32 shims over SDL2, the EGL/GLES2 bridge, FMOD Ex.",
   legal:"<b>Legal:</b> this repository contains only original tooling and runtime — <b>no game binaries, assets or code</b>. You need your own legal copy of Don't Starve. Lifted C and all game material stay local (git-ignored). Don't Starve © Klei Entertainment; not affiliated with Klei. · Tooling under the MIT license."
  },
  pt:{
@@ -125,13 +125,13 @@ const T = {
    ["Lift para C99","4,2M linhas, 0 falhas"],
    ["Compila + linka","host x86-64; exe + 2 DLLs do CRT liftadas num binário"],
    ["Host arena + IAT + DllMain","arena de 2 GB; 955 imports resolvidos; DllMain do CRT roda"],
-   ["Inicialização do CRT","endereço de retorno vaza pro esp no static-init C++ (parede atual)"],
-   ["Menu principal nativo","primeiro marco jogável"],
+   ["Inicialização do CRT","DllMain dos 2 CRTs + startup do CRT do exe completos; main() do jogo roda"],
+   ["Menu principal nativo","primeiro marco jogável (atual: janela Win32 + contexto GLES2)"],
    ["Estabilidade","fechar o loop de ICALL o bastante pra jogar"],
    ["Áudio (shim do FMOD Ex)","banks FSB5/Vorbis"],
    ["Pacote PortMaster + FPS","vs o teto de ~20–22 FPS do box64"]],
   hHelp:"Onde a comunidade pode ajudar",
-  help:"<b>Parede atual: bring-up do CRT VC9 recompilado.</b> O entry recompilado roda o startup do CRT, mas durante a inicialização estática C++ um <b>sentinela de endereço de retorno vaza para <code>esp</code>/<code>ebp</code></b> dentro de funções do CRT que fazem cirurgia crua na pilha, incompatível com o modelo de call/ret do recomp. Já temos HLE nativo de <code>__EH_prolog</code> e <code>_SEH_prolog4</code>, mas nenhum dos dois é a fonte do vazamento. Ferramenta de debug: um <b>backtrace sem gdb</b> no crash handler (o recomp usa calls C reais, então o backtrace do host <i>é</i> a cadeia de chamadas do guest).<br><br>Backtrace atual: <code>DllMain → sub_78542B94 → sub_78562B86 → _setmbcp → crash (esp inválido)</code>. Procura-se: a função que escreve um valor de pilha (o endereço de retorno) de volta em <code>esp</code>/<code>ebp</code>.",
+  help:"<b>Parede atual: a superfície Win32 que o jogo usa antes do primeiro frame.</b> O CRT VC9 recompilado agora inicializa por completo (os dois DllMain e o startup do CRT do exe) e o <code>main()</code> do próprio jogo roda: 630 funções executadas, 262 delas no exe do jogo. Ele já imprime a primeira linha (uma consulta WMI de hardware que falha, inofensiva). Os próximos imports são o gerenciamento de janela do USER32 e depois a ponte ANGLE <code>libEGL</code>/<code>libGLESv2</code> para GLES2 nativo. Cada import faltando para a execução com o próprio nome, então o ciclo é: escrever o shim, rebuildar, rodar de novo.<br><br>Como a parede do CRT caiu: o <code>DecodePointer</code> do kernel32 usava um shim cdecl e não desempilhava o argumento, o que deslocava o <code>pop esi/pop ebp</code> no <code>_decode_pointer</code> do CRT (o <code>this</code> = 0xDEAD0000); depois suporte no lifter a <code>lock xadd</code> e <code>rep ret</code>; depois seeds por relocação para as tabelas de init do CRT que a descida recursiva nunca alcança. Procura-se ajuda: shims USER32/GDI32 sobre SDL2, a ponte EGL/GLES2, FMOD Ex.",
   legal:"<b>Legal:</b> este repositório contém apenas ferramentas e runtime originais — <b>nenhum binário, asset ou código do jogo</b>. Você precisa da sua própria cópia legítima de Don't Starve. O C liftado e todo material do jogo ficam locais (fora do git). Don't Starve © Klei Entertainment; sem afiliação com a Klei. · Ferramentas sob licença MIT."
  }
 };

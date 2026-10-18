@@ -1,0 +1,52 @@
+From e04a51ad3962b0b6c98c413aa71f8b6a27937b8b Mon Sep 17 00:00:00 2001
+From: Fernando Alves <67828493+fernandoalves25@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 12:41:04 -0300
+Subject: [PATCH] lift32: xadd (lock xadd = InterlockedExchangeAdd) and
+ rep/repz ret
+
+MSVC's VC9 CRT emits 'repz ret' after a jcc (AMD predictor idiom) and
+'lock xadd [mem], reg' for refcounts; both fell through to RECOMP_UNIMPL.
+rep ret is a plain ret; xadd is dst+=src, src=old dst, flags as add.
+---
+ tools/lift/lift32.py | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/tools/lift/lift32.py b/tools/lift/lift32.py
+index 1cd9bf5..0e34b6c 100644
+--- a/tools/lift/lift32.py
++++ b/tools/lift/lift32.py
+@@ -765,6 +765,10 @@ class Lifter:
+         # under one machine lock.
+         if m.startswith('lock'):
+             m = m[4:].strip() or (insn.op_str.split() or [''])[0]
++        # `rep ret` / `repz ret` (F3 C3) is the AMD branch-predictor idiom MSVC's
++        # CRT emits after a jcc; the prefix means nothing and it is a plain ret.
++        if m in ('rep ret', 'repz ret', 'repe ret', 'bnd ret'):
++            m = 'ret'
+         ops = insn.operands if insn.operands else []
+         lines = []
+ 
+@@ -886,6 +890,20 @@ class Lifter:
+                 lines.append(f"{self._fmt_write(ops[0], f'{a} + {b}')}; {comment}")
+                 self._flag_state = ('add', "_flag_a, _flag_b")
+ 
++        elif m == 'xadd':
++            # xadd dst, src: tmp = dst + src; src = old dst; dst = tmp; flags as add.
++            # Interlocked(Exchange)Add / refcounts (`lock xadd [eax], ecx`). The old
++            # dst is held in a temp: when src and dst alias the write order matters.
++            if len(ops) == 2:
++                a = self._fmt_read(ops[0])
++                b = self._fmt_read(ops[1])
++                lines.append(f"{{ uint32_t _xa = {a}, _xb = {b}; {comment}")
++                lines.append(self._flag_capture("_xa", "_xb", op_bits(ops[0])))
++                lines.append("_cf = (uint32_t)((uint32_t)(_flag_a + _flag_b) < (uint32_t)_flag_a);")
++                lines.append(f"  {self._fmt_write(ops[1], '_xa')};")
++                lines.append(f"  {self._fmt_write(ops[0], '_xa + _xb')}; }}")
++                self._flag_state = ('add', "_flag_a, _flag_b")
++
+         elif m == 'sub':
+             if len(ops) == 2:
+                 a = self._fmt_read(ops[0])
+-- 
+2.43.0.windows.1
+

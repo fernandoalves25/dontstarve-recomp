@@ -13,6 +13,8 @@
 #include <pthread.h>
 #include "ds_hle.h"
 
+#define DS_GAME_ROOT "Z:\\dontstarve"
+#define DS_EXE_PATH  DS_GAME_ROOT "\\bin\\dontstarve_steam.exe"
 enum { HK_HEAP = 1, HK_MODULE, HK_FILE, HK_MUTEX, HK_EVENT, HK_THREAD };
 
 /* ---- a guest string helper: copy a C string into the arena, return its VA ---- */
@@ -37,7 +39,7 @@ static void sh_GetModuleHandleA(void) {
 static void sh_GetModuleFileNameA(void) {
     /* (hModule, lpFilename, nSize) */
     char *buf = (char *)APTR(1); uint32_t size = A32(2);
-    const char *path = "Z:\\dontstarve\\dontstarve.exe";
+    const char *path = DS_EXE_PATH;
     uint32_t n = (uint32_t)strlen(path);
     if (n + 1 > size) n = size ? size - 1 : 0;
     memcpy(buf, path, n); if (size) buf[n] = 0;
@@ -213,8 +215,13 @@ static uint32_t guest_int(uint32_t *slot, uint32_t val) {
 static void sh_set_app_type(void)   { RET(0, 0); }         /* __set_app_type(int) */
 static void sh_p__fmode(void)       { RET(guest_int(&g_fmode_va, 0), 0); }    /* __p__fmode() */
 static void sh_p__commode(void)     { RET(guest_int(&g_commode_va, 0), 0); }  /* __p__commode() */
-static void sh_encode_pointer(void) { RET(A32(0), 0); }    /* identity */
+static void sh_encode_pointer(void) { RET(A32(0), 0); }    /* identity; MSVCR90 _encode_pointer (cdecl) */
 static void sh_decode_pointer(void) { RET(A32(0), 0); }
+/* kernel32 Encode/DecodePointer are WINAPI: they pop their argument. Sharing the
+ * cdecl shim left esp 4 low in the CRT's _decode_pointer, whose pop esi/pop ebp
+ * then read the wrong slots -- the 0xDEAD0000 "this" in _LocaleUpdate. */
+static void sh_EncodePointer(void)  { RET(A32(0), 1); }
+static void sh_DecodePointer(void)  { RET(A32(0), 1); }
 static void sh_controlfp(void)      { RET(0x0009001Fu, 0); }          /* _controlfp(new,mask) */
 static void sh_controlfp_s(void)    { if (A32(0)) MEM32(A32(0)) = 0x0008001Fu; RET(0, 0); } /* (cur,new,mask) */
 static void sh_setusermatherr(void) { RET(0, 0); }
@@ -377,6 +384,85 @@ static void sh_GetCommandLineW(void) {
 static void sh_GetModuleHandleExW(void) { if (A32(2)) MEM32(A32(2)) = 0x00400000u; RET(1, 3); }
 static void sh_GetProcessAffinityMask(void) { if (A32(1)) MEM32(A32(1)) = 0xF; if (A32(2)) MEM32(A32(2)) = 0xF; RET(1, 3); }
 
+/* ===================== WinMain-era batch: sync objects, memory, paths.
+ * The guest sees the Steam layout under a virtual drive: the exe in
+ * Z:\dontstarve\bin, the data in Z:\dontstarve\data. File I/O maps onto the
+ * host later; these only answer queries about the layout. */
+static char g_cwd[260] = DS_GAME_ROOT "\\bin";
+
+static uint32_t copy_out_a(uint32_t dst, uint32_t cap, const char *s) {   /* Win32 buffer rules */
+    uint32_t n = (uint32_t)strlen(s);
+    if (!dst || cap <= n) return n + 1;          /* too small: required size incl. NUL */
+    memcpy(ds_hostptr(dst), s, n + 1);
+    return n;
+}
+/* Mutexes/semaphores: one machine lock serialises guest threads, so the
+ * objects only need to exist; waits succeed at once. */
+static void sh_CreateMutexA(void)      { g_last_error = 0; RET(ds_handle_new(HK_MUTEX, 0), 3); }
+static void sh_ReleaseMutex(void)      { RET(1, 1); }
+static void sh_CreateSemaphoreA(void)  { g_last_error = 0; RET(ds_handle_new(HK_EVENT, 0), 4); }
+static void sh_ReleaseSemaphore(void)  { if (A32(2)) MEM32(A32(2)) = 0; RET(1, 3); }
+static void sh_WaitForSingleObject(void)    { RET(0, 2); }   /* WAIT_OBJECT_0 */
+static void sh_WaitForMultipleObjects(void) { RET(0, 4); }
+static void sh_SleepEx(void)           { RET(0, 2); }
+static void sh_SetThreadPriority(void) { RET(1, 2); }
+static void sh_OutputDebugStringA(void){ fprintf(stderr, "[guest] %s", ASTR(0)); RETV(1); }
+static void sh_lstrlenA(void)          { RET(A32(0) ? (uint32_t)strlen(ASTR(0)) : 0, 1); }
+static void sh_GlobalLock(void)        { RET(A32(0), 1); }   /* GMEM_FIXED: handle == pointer */
+static void sh_GlobalUnlock(void)      { RET(1, 1); }
+static void sh_FlushConsoleInputBuffer(void) { RET(1, 1); }
+static void sh_LoadLibraryW(void)      { RET(ds_handle_new(HK_MODULE, 0), 1); }
+static void sh_FormatMessageA(void)    { RET(0, 7); }
+static void sh_GlobalMemoryStatus(void) {          /* MEMORYSTATUS (32 bytes) */
+    uint32_t p = A32(0);
+    memset(ds_hostptr(p), 0, 32);
+    MEM32(p) = 32; MEM32(p + 8) = 1024u << 20; MEM32(p + 12) = 768u << 20;   /* phys total/avail */
+    MEM32(p + 16) = 2048u << 20; MEM32(p + 20) = 1536u << 20;               /* page file */
+    MEM32(p + 24) = 0x7FFE0000u; MEM32(p + 28) = 0x60000000u;               /* virtual */
+    RETV(1);
+}
+static void sh_GlobalMemoryStatusEx(void) {        /* MEMORYSTATUSEX (64 bytes, 64-bit fields) */
+    uint32_t p = A32(0);
+    memset(ds_hostptr(p), 0, 64);
+    MEM32(p) = 64;
+    MEM32(p + 8)  = 1024u << 20;  /* ullTotalPhys */
+    MEM32(p + 16) = 768u << 20;   /* ullAvailPhys */
+    MEM32(p + 24) = 2048u << 20;  /* ullTotalPageFile */
+    MEM32(p + 32) = 1536u << 20;  /* ullAvailPageFile */
+    MEM32(p + 40) = 0x7FFE0000u;  /* ullTotalVirtual */
+    MEM32(p + 48) = 0x60000000u;  /* ullAvailVirtual */
+    RET(1, 1);
+}
+static void sh_GetCurrentDirectoryA(void) { RET(copy_out_a(A32(1), A32(0), g_cwd), 2); }
+static void sh_SetCurrentDirectoryA(void) {
+    const char *d = ASTR(0);
+    size_t n = strlen(g_cwd);
+    if (d[0] && d[1] == ':') snprintf(g_cwd, sizeof g_cwd, "%s", d);
+    else snprintf(g_cwd + n, sizeof g_cwd - n, "\\%s", d);
+    fprintf(stderr, "[ds] SetCurrentDirectoryA(%s) -> %s\n", d, g_cwd);
+    RET(1, 1);
+}
+static void sh_GetFullPathNameA(void) {            /* (name, cap, buf, *filepart) */
+    const char *nm = ASTR(0); char full[520];
+    if (nm[0] && nm[1] == ':') snprintf(full, sizeof full, "%s", nm);
+    else snprintf(full, sizeof full, "%s\\%s", g_cwd, nm);
+    uint32_t r = copy_out_a(A32(2), A32(1), full);
+    if (A32(3) && r < A32(1)) {
+        char *sl = strrchr(full, '\\');
+        MEM32(A32(3)) = A32(2) + (uint32_t)(sl ? sl - full + 1 : 0);
+    }
+    RET(r, 4);
+}
+static void sh_GetLongPathNameA(void) { RET(copy_out_a(A32(1), A32(2), ASTR(0)), 3); }
+static void sh_ExpandEnvironmentStringsA(void) {   /* returns chars incl. NUL */
+    uint32_t r = copy_out_a(A32(1), A32(2), ASTR(0));
+    RET(r < A32(2) ? r + 1 : r, 3);
+}
+static void sh_RaiseException(void) {
+    ds_fatal("guest RaiseException(code 0x%08X, flags %u, nargs %u) from 0x%08X",
+             A32(0), A32(1), A32(2), g_cur_func);
+}
+
 const ds_shim ds_kernel32[] = {
     { "GetCommandLineA", sh_GetCommandLineA },
     { "GetModuleHandleA", sh_GetModuleHandleA },
@@ -425,8 +511,8 @@ const ds_shim ds_kernel32[] = {
     { "InterlockedExchange", sh_InterlockedExchange },
     { "InterlockedExchangeAdd", sh_InterlockedExchangeAdd },
     { "InterlockedCompareExchange", sh_InterlockedCompareExchange },
-    { "EncodePointer", sh_encode_pointer },
-    { "DecodePointer", sh_decode_pointer },
+    { "EncodePointer", sh_EncodePointer },
+    { "DecodePointer", sh_DecodePointer },
     /* MSVCR90 CRT startup (__cdecl) */
     { "__set_app_type", sh_set_app_type },
     { "__p__fmode", sh_p__fmode },
@@ -490,9 +576,23 @@ const ds_shim ds_kernel32[] = {
     { "Sleep", sh_Sleep }, { "RtlUnwind", sh_RtlUnwind },
     { "GetCommandLineW", sh_GetCommandLineW }, { "GetModuleHandleExW", sh_GetModuleHandleExW },
     { "GetProcessAffinityMask", sh_GetProcessAffinityMask },
+    /* WinMain-era batch */
+    { "CreateMutexA", sh_CreateMutexA }, { "ReleaseMutex", sh_ReleaseMutex },
+    { "CreateSemaphoreA", sh_CreateSemaphoreA }, { "ReleaseSemaphore", sh_ReleaseSemaphore },
+    { "WaitForSingleObject", sh_WaitForSingleObject }, { "WaitForMultipleObjects", sh_WaitForMultipleObjects },
+    { "SleepEx", sh_SleepEx }, { "SetThreadPriority", sh_SetThreadPriority },
+    { "OutputDebugStringA", sh_OutputDebugStringA }, { "lstrlenA", sh_lstrlenA },
+    { "GlobalLock", sh_GlobalLock }, { "GlobalUnlock", sh_GlobalUnlock },
+    { "FlushConsoleInputBuffer", sh_FlushConsoleInputBuffer }, { "LoadLibraryW", sh_LoadLibraryW },
+    { "FormatMessageA", sh_FormatMessageA },
+    { "GlobalMemoryStatus", sh_GlobalMemoryStatus }, { "GlobalMemoryStatusEx", sh_GlobalMemoryStatusEx },
+    { "GetCurrentDirectoryA", sh_GetCurrentDirectoryA }, { "SetCurrentDirectoryA", sh_SetCurrentDirectoryA },
+    { "GetFullPathNameA", sh_GetFullPathNameA }, { "GetLongPathNameA", sh_GetLongPathNameA },
+    { "ExpandEnvironmentStringsA", sh_ExpandEnvironmentStringsA }, { "RaiseException", sh_RaiseException },
     { 0, 0 }
 };
 
 void ds_host_init(void) {
     ds_register(ds_kernel32);
+    ds_register(ds_win32);
 }

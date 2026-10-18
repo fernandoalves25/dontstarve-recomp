@@ -42,8 +42,8 @@ and the PC UI.
 
 **How much of the game actually runs.** Every function is already *lifted* to C — that's the
 easy part. What matters is how many have **executed** natively without crashing. Each cell ≈ 16
-functions: **bright = ran at runtime**, dim = lifted but never reached yet. Today execution stops
-inside the CRT startup, before the game's own code — so almost everything is still dim. The map
+functions: **bright = ran at runtime**, dim = lifted but never reached yet. Today execution runs
+through the CRT startup into the game's own `main()`, and stops at the first Win32 window calls. The map
 fills in as the port progresses (measured with a `COVERAGE=1` build, see `scripts/coverage_counts.py`).
 
 ![progress map](docs/progress-en.svg)
@@ -57,24 +57,32 @@ fills in as the port progresses (measured with a `COVERAGE=1` build, see `script
 | M2 Lift to C99 — 4.2M lines, **0 failures** | ✅ done |
 | M3 Compiles + links (exe + 2 lifted CRT DLLs) | ✅ done |
 | M4 Arena host, IAT binding (955/955), CRT `DllMain` runs | ✅ done |
-| **M5 CRT initialization** | 🟡 **in progress — current wall** |
-| M6 Native main menu | ⬜ |
+| M5 CRT initialization — both CRT `DllMain`s + exe CRT startup, game `main()` runs | ✅ done |
+| **M6 Native main menu** | 🟡 **in progress — Win32 window + GLES2 context** |
 | M7 Stability | ⬜ |
 | M8 Audio (FMOD Ex shim) | ⬜ |
 | M9 PortMaster package + FPS vs box64 | ⬜ |
 
 ### 🙋 Where help is needed
 
-The recompiled CRT runs its startup, but during C++ static initialization a **return-address
-sentinel leaks into `esp`/`ebp`** inside some CRT functions that perform raw stack surgery
-incompatible with the recomp call/ret model. Native HLE of `__EH_prolog` and `_SEH_prolog4`
-is done, but neither is the leak source.
+The recompiled VC9 CRT now initializes completely and the game's own `main()` runs:
+**630 functions executed, 262 of them in the game exe**. It prints its first line (a failed WMI
+hardware query — harmless). Every missing import stops the run with its own name, so the loop
+is: write the shim, rebuild, rerun. Next up:
 
-- Current backtrace: `DllMain → sub_78542B94 → sub_78562B86 → _setmbcp → crash (invalid esp)`
-- Wanted: the function that writes a stack value (the return address) back into `esp`/`ebp`.
-- Debug tooling: the crash handler prints a **gdb-free backtrace** (the recomp uses real C
-  calls, so the host backtrace *is* the guest call chain), the last lifted function entered,
-  and the fault as a guest VA.
+- **USER32 / GDI32** — window, message pump, cursor, display modes (planned over SDL2/KMSDRM).
+- **libEGL / libGLESv2** (imported by ordinal, ANGLE) → bridge to native GLES2 on the Mali GPU.
+- **FMOD Ex + FMOD Event** API shim; **XINPUT/DINPUT8** → SDL2 game controller; file I/O
+  mapped onto the game data directory.
+
+How the CRT wall fell (for anyone hitting similar walls with pcrecomp): kernel32
+`DecodePointer` shared a cdecl shim and didn't pop its argument, shifting `pop esi/pop ebp` in
+the CRT's `_decode_pointer` — the `0xDEAD0000` `this`. Found by recompiling one lifted file with
+`-g` and printing the lifted locals (`l_esp`, `l_esi`…) after every call under gdb. Then lifter
+support for `lock xadd` and `rep ret` ([patches/pcrecomp](patches/pcrecomp)), then
+relocation-based seeds ([scripts/reloc_seeds.py](scripts/reloc_seeds.py)) for CRT init tables
+that recursive descent never reaches. `DS_SENTINEL=1` (COVERAGE build) aborts on the first
+function entered with the sentinel in `esp`/`ebp`.
 
 Ideas, PRs and discussion very welcome — see [docs/01-ARCHITECTURE.md](docs/01-ARCHITECTURE.md).
 
@@ -85,7 +93,8 @@ Requirements: Windows + WSL (gcc), Python 3.10 with `capstone pefile unicorn key
 ```bash
 # 1. pcrecomp, pinned + patched (patches from nfsu2-recompiled-r36s)
 git clone https://github.com/sp00nznet/pcrecomp && cd pcrecomp
-git checkout 35548b8 && git am ../nfsu2-recompiled-r36s/patches/pcrecomp/*.patch && cd ..
+git checkout 35548b8 && git am ../nfsu2-recompiled-r36s/patches/pcrecomp/*.patch
+git am ../patches/pcrecomp/*.patch && cd ..   # this repo's own lifter fixes (0015+)
 
 # 2. Put YOUR dontstarve_steam.exe in work/, and msvcr90.dll + msvcp90.dll
 #    (x86, 9.0.30729.x — from your Windows WinSxS or the game's vcredist)
@@ -96,6 +105,8 @@ python scripts/run_lift.py lift    work/dontstarve_steam.exe work/catalog.json s
 bash   scripts/lift_dll.sh work/msvcr90.dll msvcr90_
 bash   scripts/lift_dll.sh work/msvcp90.dll msvcp90_
 python scripts/find_data_funcs.py work/msvcr90.dll work/msvcr90_catalog.json config/exclude.txt
+python scripts/find_data_funcs.py work/msvcp90.dll work/msvcp90_catalog.json config/exclude.txt
+#    then re-run the two DLL lifts so the exclude list applies (lift_dll.sh also adds reloc seeds)
 
 # 4. Build + run the host (WSL)
 bash scripts/build_guest_obj.sh && bash scripts/build_arena_host.sh
@@ -134,8 +145,8 @@ tudo que o port Android perde: todas as DLCs (RoG, Shipwrecked, Hamlet), **mods*
 
 **Quanto do jogo realmente roda.** Todas as funções já estão *liftadas* para C — essa é a parte
 fácil. O que importa é quantas já **executaram** nativamente sem crashar. Cada célula ≈ 16 funções:
-**clara = rodou em runtime**, escura = liftada mas ainda não alcançada. Hoje a execução para dentro
-do startup do CRT, antes do código do próprio jogo — por isso quase tudo ainda está escuro. O mapa
+**clara = rodou em runtime**, escura = liftada mas ainda não alcançada. Hoje a execução passa pelo
+startup do CRT e entra no `main()` do jogo, parando nas primeiras chamadas de janela do Win32. O mapa
 vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, veja `scripts/coverage_counts.py`).
 
 ![mapa de progresso](docs/progress-pt.svg)
@@ -149,24 +160,32 @@ vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, ve
 | M2 Lift para C99 — 4,2M linhas, **0 falhas** | ✅ feito |
 | M3 Compila + linka (exe + 2 DLLs do CRT liftadas) | ✅ feito |
 | M4 Host arena, bind da IAT (955/955), `DllMain` do CRT roda | ✅ feito |
-| **M5 Inicialização do CRT** | 🟡 **em progresso — parede atual** |
-| M6 Menu principal nativo | ⬜ |
+| M5 Inicialização do CRT — `DllMain` dos 2 CRTs + startup do exe, `main()` do jogo roda | ✅ feito |
+| **M6 Menu principal nativo** | 🟡 **em progresso — janela Win32 + contexto GLES2** |
 | M7 Estabilidade | ⬜ |
 | M8 Áudio (shim do FMOD Ex) | ⬜ |
 | M9 Pacote PortMaster + FPS vs box64 | ⬜ |
 
 ### 🙋 Onde precisamos de ajuda
 
-O CRT recompilado roda o startup, mas durante a inicialização estática C++ um **sentinela de
-endereço de retorno vaza para `esp`/`ebp`** dentro de funções do CRT que fazem cirurgia crua na
-pilha, incompatível com o modelo de call/ret do recomp. Já temos HLE nativo de `__EH_prolog` e
-`_SEH_prolog4`, mas nenhum dos dois é a fonte do vazamento.
+O CRT VC9 recompilado agora inicializa por completo e o `main()` do próprio jogo roda:
+**630 funções executadas, 262 delas no exe do jogo**. Ele já imprime a primeira linha (uma
+consulta WMI de hardware que falha — inofensiva). Cada import faltando para a execução com o
+próprio nome, então o ciclo é: escrever o shim, rebuildar, rodar de novo. Próximos passos:
 
-- Backtrace atual: `DllMain → sub_78542B94 → sub_78562B86 → _setmbcp → crash (esp inválido)`
-- Procura-se: a função que escreve um valor de pilha (o endereço de retorno) de volta em `esp`/`ebp`.
-- Ferramenta de debug: o crash handler imprime um **backtrace sem gdb** (o recomp usa calls C
-  reais, então o backtrace do host *é* a cadeia de chamadas do guest), a última função liftada
-  e o fault como VA do guest.
+- **USER32 / GDI32** — janela, message pump, cursor, modos de vídeo (planejado sobre SDL2/KMSDRM).
+- **libEGL / libGLESv2** (importados por ordinal, ANGLE) → ponte para GLES2 nativo na GPU Mali.
+- Shim da API **FMOD Ex + FMOD Event**; **XINPUT/DINPUT8** → SDL2 game controller; I/O de
+  arquivos mapeado para o diretório de dados do jogo.
+
+Como a parede do CRT caiu (para quem bater em paredes parecidas com o pcrecomp): o
+`DecodePointer` do kernel32 usava um shim cdecl e não desempilhava o argumento, deslocando o
+`pop esi/pop ebp` no `_decode_pointer` do CRT — o `this` = `0xDEAD0000`. Achado recompilando um
+arquivo liftado com `-g` e imprimindo os locais liftados (`l_esp`, `l_esi`…) depois de cada call
+no gdb. Depois, suporte no lifter a `lock xadd` e `rep ret` ([patches/pcrecomp](patches/pcrecomp)),
+e seeds por relocação ([scripts/reloc_seeds.py](scripts/reloc_seeds.py)) para as tabelas de init do
+CRT que a descida recursiva nunca alcança. `DS_SENTINEL=1` (build COVERAGE) aborta na primeira
+função que entra com o sentinela em `esp`/`ebp`.
 
 Ideias, PRs e discussão são muito bem-vindos — veja [docs/01-ARCHITECTURE.md](docs/01-ARCHITECTURE.md).
 
@@ -182,7 +201,9 @@ Os comandos são os mesmos da seção em inglês acima.
 ```
 docs/          design decisions, architecture, status page (index.html)
 scripts/       lift + build drivers (run_lift.py, lift_dll.sh, find_data_funcs.py, build_*.sh, gen_status.py)
-src/runtime/   arena host (ds_host.c), shim ABI (ds_hle.h), kernel32/CRT shims (ds_kernel32.c)
+src/runtime/   arena host (ds_host.c), shim ABI (ds_hle.h), kernel32/CRT shims (ds_kernel32.c),
+               platform shims: winmm, steam_api, COM, shell32 (ds_win32.c)
+patches/       this repo's pcrecomp lifter fixes, applied on top of a847ef6
 config/        overrides.txt (native HLE of CRT EH helpers), hooks.txt
 ```
 

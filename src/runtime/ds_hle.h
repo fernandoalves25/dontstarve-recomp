@@ -61,5 +61,6 @@ extern int ds_trace;                                      /* DS_HLE_TRACE: one l
 
 /* each module's table (defined in its .c, registered by the host) */
 extern const ds_shim ds_kernel32[];
+extern const ds_shim ds_win32[];
 
 #endif /* DS_HLE_H */
