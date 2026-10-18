@@ -57,7 +57,11 @@ descrito em "Deltas vs NFSU2" abaixo.
 
 - **Lift (Windows, Python 3.10):** capstone 5.0.7, pefile 2023.2.7, unicorn
   2.1.4, keystone — **prontos**. Rodam agora.
-- **Cross-build aarch64:** WSL tem `aarch64-linux-gnu-gcc 13.3.0`, mas é Ubuntu
+- **Resolvido (2026-10-18) / Solved:** `scripts/make_sysroot_bionic.py` monta um sysroot arm64 do
+  Ubuntu 18.04 (glibc 2.27) e `scripts/build_arm64.sh link` liga contra ele: o binário só exige
+  **GLIBC_2.17** e roda sob `qemu-aarch64`. EN: an Ubuntu 18.04 arm64 sysroot makes the aarch64
+  binary need only GLIBC_2.17; it boots to the main menu under qemu-aarch64.
+- **Cross-build aarch64 (histórico):** WSL tem `aarch64-linux-gnu-gcc 13.3.0`, mas é Ubuntu
   24.04 (**glibc ~2.39**). O aparelho é **glibc 2.30** → binário não carregaria
   (erro de versão de símbolo). ⚠ **A resolver:** buildar em container/distro
   antiga (glibc ≤ 2.30) com toolchain aarch64 — exatamente o que o NFSU2 fez

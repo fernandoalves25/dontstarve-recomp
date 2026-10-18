@@ -62,7 +62,7 @@ fills in as the port progresses (measured with a `COVERAGE=1` build, see `script
 | M6 Native main menu — the recompiled game draws its menu (headless x86-64 + Mesa) | ✅ done |
 | **M7 Stability** | 🟡 **in progress — a new world generates, loads and simulates; long play sessions next** |
 | M8 Audio (FMOD Ex shim) | ⬜ |
-| M9 PortMaster package + FPS vs box64 | ⬜ |
+| **M9 PortMaster package + FPS vs box64** | 🟡 **aarch64 build (glibc 2.17) runs under qemu; needs a real R36S** |
 
 ### 🙋 Where help is needed
 
@@ -70,9 +70,11 @@ fills in as the port progresses (measured with a `COVERAGE=1` build, see `script
 Play → New Game → Start: the `WorldSim` thread generates the world (voronoi map, tile map, roads,
 "Generation complete"), the game loads it and simulates it with the player, the HUD and the
 creatures — **4,795 functions executed**. The **SDL2 backend** (`DS_VIDEO=sdl`) draws the same
-frames in an SDL window with an SDL game controller as XInput pad 0. The **aarch64**
-cross-build ([scripts/build_arm64.sh](scripts/build_arm64.sh)) and a PortMaster launcher
-([port/dontstarve.sh](port/dontstarve.sh)) are in progress.
+frames in an SDL window with an SDL game controller as XInput pad 0. The whole tree
+**cross-compiles for aarch64** at `-O2` ([scripts/build_arm64.sh](scripts/build_arm64.sh)) against
+an Ubuntu 18.04 sysroot, so the binary needs only **glibc 2.17** (ArkOS has 2.30); under
+`qemu-aarch64` it boots and draws the same main menu. A PortMaster launcher is in
+[port/dontstarve.sh](port/dontstarve.sh).
 
 **Milestone M6: the main menu runs natively.** The recompiled `dontstarve.exe` (the DRM-free
 standalone build; 16,146 functions, 0 lift failures) boots through the CRT, creates its window,
@@ -163,6 +165,13 @@ python scripts/find_data_funcs.py work/msvcp90.dll work/msvcp90_catalog.json con
 # 4. Build + run the host (game data: DS_GAME_DIR=<your install dir>, default gamedata/)
 bash scripts/build_guest_obj.sh && bash scripts/build_arena_host.sh
 ./build/dontstarve_host --run-entry
+#    headless + scripted: DS_INPUT="1000 click 540 205" DS_DUMP_FRAMES=100 DS_EXIT_AFTER_FRAMES=1500
+#    real window/pad:     DS_VIDEO=sdl ./build/dontstarve_host --run-entry
+
+# 5. R36S (aarch64, glibc 2.17): sysroot, cross-build, then the PortMaster folder
+python3 scripts/make_sysroot_bionic.py
+SYSROOT=$PWD/build/sysroot-arm64 bash scripts/build_arm64.sh link     # build/dontstarve_host.aarch64
+#    ports/dontstarve/: the binary, port/dontstarve.sh, gamedata/{bin,data,mods}, crt/msvc[rp]90.dll
 ```
 
 ---
@@ -216,7 +225,7 @@ vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, ve
 | M6 Menu principal nativo — o jogo recompilado desenha o menu (headless x86-64 + Mesa) | ✅ feito |
 | **M7 Estabilidade** | 🟡 **em progresso — um mundo novo é gerado, carregado e simulado; sessões longas a seguir** |
 | M8 Áudio (shim do FMOD Ex) | ⬜ |
-| M9 Pacote PortMaster + FPS vs box64 | ⬜ |
+| **M9 Pacote PortMaster + FPS vs box64** | 🟡 **build aarch64 (glibc 2.17) roda sob qemu; precisa de um R36S de verdade** |
 
 ### 🙋 Onde precisamos de ajuda
 
@@ -224,9 +233,11 @@ vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, ve
 headless por Play → New Game → Start: a thread `WorldSim` gera o mundo (mapa de voronoi, mapa de
 tiles, estradas, "Generation complete"), o jogo o carrega e simula com o jogador, o HUD e as
 criaturas — **4.795 funções executadas**. O **backend SDL2** (`DS_VIDEO=sdl`) desenha os mesmos
-frames numa janela SDL, com um controle SDL como pad XInput 0. O build cruzado **aarch64**
-([scripts/build_arm64.sh](scripts/build_arm64.sh)) e um lançador do PortMaster
-([port/dontstarve.sh](port/dontstarve.sh)) estão em andamento.
+frames numa janela SDL, com um controle SDL como pad XInput 0. A árvore inteira **compila
+cruzado para aarch64** em `-O2` ([scripts/build_arm64.sh](scripts/build_arm64.sh)) contra um sysroot
+do Ubuntu 18.04, então o binário só exige **glibc 2.17** (o ArkOS tem 2.30); sob `qemu-aarch64` ele
+inicializa e desenha o mesmo menu principal. Um lançador do PortMaster está em
+[port/dontstarve.sh](port/dontstarve.sh).
 
 **Marco M6: o menu principal roda nativo.** O `dontstarve.exe` recompilado (o build standalone
 DRM-free; 16.146 funções, 0 falhas de lift) passa pelo CRT, cria a janela, sobe EGL + GLES2,
@@ -297,6 +308,9 @@ Ideias, PRs e discussão são muito bem-vindos — veja [docs/01-ARCHITECTURE.md
 Requisitos: Linux (ou Windows + WSL) com gcc, bibliotecas dev de EGL + GLES2 (Mesa: `libegl-dev libgles-dev`),
 Python 3.10+ com `capstone pefile unicorn keystone-engine`.
 Use o seu `dontstarve.exe` **standalone DRM-free** (o build Steam exige o cliente da Steam rodando).
+Para o R36S: `python3 scripts/make_sysroot_bionic.py` e depois
+`SYSROOT=$PWD/build/sysroot-arm64 bash scripts/build_arm64.sh link` (binário aarch64 com glibc 2.17);
+o lançador do PortMaster é o [port/dontstarve.sh](port/dontstarve.sh).
 Os comandos são os mesmos da seção em inglês acima.
 
 ---
