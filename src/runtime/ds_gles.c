@@ -146,6 +146,7 @@ static void sh_eglMakeCurrent(void) {            /* (dpy, draw, read, ctx) */
 }
 
 static uint32_t g_frame;
+uint32_t ds_frame_count(void) { return g_frame; }
 static void dump_frame(uint32_t n) {
     static uint8_t *px;
     if (!px) px = (uint8_t *)malloc((size_t)DS_SCREEN_W * DS_SCREEN_H * 4);

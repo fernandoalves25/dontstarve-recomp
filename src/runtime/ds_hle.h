@@ -73,6 +73,7 @@ uint32_t  hle_call_guest(uint32_t va, int nargs, const uint32_t *args);
 /* ---- host services ---- */
 void      ds_fatal(const char *fmt, ...);
 extern int ds_trace;                                      /* DS_HLE_TRACE: one line per shim call */
+uint32_t  ds_frame_count(void);                           /* frames swapped so far (ds_gles.c) */
 void      ds_set_last_error(uint32_t err);                /* kernel32 GetLastError value */
 const char *ds_cwd(void);                                 /* guest current directory (Z:\...) */
 int       ds_map_path(const char *gpath, char *host, size_t cap);   /* 1 exists, 0 leaf missing, <0 no */
