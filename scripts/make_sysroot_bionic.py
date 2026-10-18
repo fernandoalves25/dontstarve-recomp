@@ -3,7 +3,7 @@
 
 ArkOS (the R36S image) has glibc 2.30; a binary linked on a current distro
 needs 2.34+ and will not load there. This fetches Ubuntu 18.04 "bionic" arm64
-packages (glibc 2.27) -- libc, SDL2, EGL, GLESv2 and their headers -- from
+packages (glibc 2.27) -- libc, SDL2, EGL, GLESv2, libvorbis/libogg/zlib and their headers -- from
 ports.ubuntu.com and unpacks them into build/sysroot-arm64. Then:
 
     SYSROOT=$PWD/build/sysroot-arm64 bash scripts/build_arm64.sh link
@@ -20,6 +20,7 @@ PACKAGES = [
     "libsdl2-2.0-0", "libsdl2-dev",
     "libglvnd0", "libegl1", "libgles2", "libglvnd-dev",
     "libegl1-mesa-dev", "libgles2-mesa-dev", "mesa-common-dev", "libglx0", "libgl1", "libopengl0", "libglx-dev", "libgl-dev",
+    "libogg0", "libogg-dev", "libvorbis0a", "libvorbisenc2", "libvorbis-dev", "zlib1g", "zlib1g-dev",
 ]
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 OUT = os.path.join(ROOT, "build", "sysroot-arm64")

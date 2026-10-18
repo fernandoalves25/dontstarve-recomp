@@ -166,28 +166,29 @@ static void load_fev(const uint8_t *d, size_t n) {
     }
     char **cats = NULL; int ncats = 0; read_cats(&r, (char *)"", 0, &cats, &ncats);
     size_t groups_at = r.p;
-    /* the sound definition table: u32 count, then records whose first name is
-     * the first "/..." string; validate by reading it through */
-    uint32_t first = 0; while (first < ns && S[first][0] != '/') first++;
+    /* the sound definition table: a u32 count, then records whose names are
+     * "/..." strings. Try every such spot and keep the largest table that
+     * reads through cleanly (its first name is not always the first "/" string). */
     size_t defs_at = 0; fev_def *defs = NULL; uint32_t ndefs = 0;
-    for (size_t q = lgn >= 8 ? lgn - 8 : 0; q > groups_at && !defs; q--) {
-        uint32_t v; memcpy(&v, lg + q, 4); if (v != first) continue;
+    for (size_t q = groups_at + 4; q + 8 <= lgn; q++) {
+        uint32_t v; memcpy(&v, lg + q, 4); if (v >= ns || S[v][0] != '/') continue;
         rd t = { lg, lgn, q - 4, 0 }; uint32_t cnt = r32(&t);
-        if (!cnt || cnt > 100000) continue;
+        if (!cnt || cnt > 100000 || cnt <= ndefs) continue;
         fev_def *dd = (fev_def *)calloc(cnt, sizeof *dd);
         for (uint32_t k = 0; k < cnt && !t.bad; k++) {
             uint32_t nm = r32(&t); r32(&t); uint32_t ne = r32(&t);
-            if (nm >= ns || ne > 10000) { t.bad = 1; break; }
+            if (nm >= ns || S[nm][0] != '/' || ne > 10000) { t.bad = 1; break; }
             dd[k].e = (fev_ent *)calloc(ne ? ne : 1, sizeof(fev_ent));
             for (uint32_t e = 0; e < ne && !t.bad; e++) {
                 uint32_t ty = r32(&t), w = r32(&t);
                 if (ty == 0) {
                     rstr(&t, NULL); uint32_t bk = r32(&t), ix = r32(&t); r32(&t);
-                    if (bk < 128 && bankmap[bk] >= 0) { fev_ent *x = &dd[k].e[dd[k].n++]; x->bank = (uint16_t)bankmap[bk]; x->idx = (uint16_t)ix; x->weight = (uint16_t)w; }
+                    if (bk < 128 && bk < nb && bankmap[bk] >= 0) { fev_ent *x = &dd[k].e[dd[k].n++]; x->bank = (uint16_t)bankmap[bk]; x->idx = (uint16_t)ix; x->weight = (uint16_t)w; }
                 } else if (ty != 2 && ty != 3) t.bad = 1;
             }
         }
         if (t.bad) { for (uint32_t k = 0; k < cnt; k++) free(dd[k].e); free(dd); continue; }
+        if (defs) { for (uint32_t k = 0; k < ndefs; k++) free(defs[k].e); free(defs); }
         defs = dd; ndefs = cnt; defs_at = q - 4;
     }
     if (!defs) { fprintf(stderr, "[audio] %s.fev: no sound definition table\n", proj); free(S); return; }
