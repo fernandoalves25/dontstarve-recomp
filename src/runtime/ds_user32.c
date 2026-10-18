@@ -347,7 +347,7 @@ static void sh_MapVirtualKeyA(void) {        /* (uCode, uMapType) */
 }
 
 /* ===================== message queue
- * Empty, except for a scripted input: DS_INPUT="F click X Y; F key VK; ..."
+ * Empty, except for a scripted input: DS_INPUT="F click X Y; F key VK; F hold VK N; ..."
  * posts, once frame F has been swapped, a mouse move + left click at (X, Y)
  * or a key press of virtual key VK -- how a headless run gets past menus. */
 #define WM_KEYDOWN     0x0100u
@@ -382,6 +382,13 @@ static void q_load(void) {
             /* spaced out: the UI picks the hovered widget on its own (sim) tick */
             q_push(f, WM_MOUSEMOVE, 0, lp); q_push(f + 10, WM_MOUSEMOVE, 0, lp);
             q_push(f + 20, WM_LBUTTONDOWN, 1, lp); q_push(f + 26, WM_LBUTTONUP, 0, lp);
+            e += used;
+        } else if (!strcmp(what, "hold") && sscanf(e, "%u %u%n", &a, &b, &used) == 2) {   /* F hold VK N */
+            uint32_t sc = 0;
+            for (size_t i = 0; i < sizeof k_vsc / sizeof k_vsc[0]; i++) if (k_vsc[i].vk == a) sc = k_vsc[i].sc;
+            q_push(f, WM_KEYDOWN, a, 1u | (sc << 16));
+            for (uint32_t r = 30; r < b; r += 30) q_push(f + r, WM_KEYDOWN, a, 0x40000001u | (sc << 16));  /* auto-repeat */
+            q_push(f + b, WM_KEYUP, a, 0xC0000001u | (sc << 16));
             e += used;
         } else if (!strcmp(what, "key") && sscanf(e, "%u%n", &a, &used) == 1) {
             uint32_t sc = 0;

@@ -88,8 +88,14 @@ static void sh_HeapDestroy(void)    { RET(1, 1); }
  * loaded its first world.) Shims run under the machine lock: no locking. */
 #define H_SMALL_MAX   4096u
 #define H_MEDIUM_MAX  (1u << 20)
-#define H_NCLASS      (256 + 256 + 1)
+/* classes: 1..256 small, 257..512 medium (1..256 pages), 513 large. The
+ * header word +4 is TAG | class: a live block is H_LIVE, a freed one H_FREE,
+ * so a HeapFree of anything else, or a second free, is ignored. */
+#define H_NCLASS      (256 + 256 + 2)
 #define H_LARGE       (H_NCLASS - 1)
+#define H_LIVE        0xA5000000u
+#define H_FREE        0x5A000000u
+#define H_TAGMASK     0xFF000000u
 static uint32_t g_hfree[H_NCLASS];                  /* free list heads (block VAs; link in payload +0) */
 static uint64_t g_heap_live;                        /* bytes handed out and not freed (diagnostics) */
 static uint32_t h_class(uint32_t size, uint32_t *cap) {
@@ -98,7 +104,7 @@ static uint32_t h_class(uint32_t size, uint32_t *cap) {
     *cap = (size + 0xFFFFu) & ~0xFFFFu; return H_LARGE;
 }
 static uint32_t h_cap(uint32_t va) {                /* capacity of a live block, from its class */
-    uint32_t c = MEM32(va - 4);
+    uint32_t c = MEM32(va - 4) & ~H_TAGMASK;
     if (c < 256 + 1) return c * 16u;
     if (c < H_LARGE) return (c - 256u) * 4096u;
     return MEM32(va - 12);                          /* large: capacity kept in a second header word */
@@ -117,18 +123,18 @@ static uint32_t heap_alloc(uint32_t size) {
         if (best) { va = *best; *best = MEM32(va); cap = MEM32(va - 12); }
         else { va = ds_arena_alloc(cap + 16u, 16) + 16u; MEM32(va - 12) = cap; }
     }
-    MEM32(va - 8) = size; MEM32(va - 4) = c;
+    MEM32(va - 8) = size; MEM32(va - 4) = H_LIVE | c;
     g_heap_live += cap;
     return va;
 }
 static void heap_free(uint32_t va) {
     if (!va) return;
-    uint32_t c = MEM32(va - 4);
-    if (c == 0 || c >= H_NCLASS) return;            /* not one of ours: ignore */
+    uint32_t w = MEM32(va - 4), c = w & ~H_TAGMASK;
+    if ((w & H_TAGMASK) != H_LIVE || c == 0 || c >= H_NCLASS) return;   /* not a live block of ours */
     g_heap_live -= h_cap(va);
     MEM32(va) = g_hfree[c]; g_hfree[c] = va;        /* large blocks keep their capacity at va - 12 */
     MEM32(va - 8) = 0;
-    MEM32(va - 4) = c | 0x80000000u;                /* marked free: a double free is ignored above */
+    MEM32(va - 4) = H_FREE | c;
 }
 static void sh_HeapAlloc(void) {
     /* (hHeap, dwFlags, dwBytes) */
@@ -138,11 +144,12 @@ static void sh_HeapAlloc(void) {
     RET(va, 3);
 }
 static void sh_HeapFree(void)   { heap_free(A32(2)); RET(1, 3); }
-static void sh_HeapSize(void)   { uint32_t p = A32(2); RET(p ? MEM32(p - 8) : 0xFFFFFFFFu, 3); }
+static void sh_HeapSize(void)   { uint32_t p = A32(2); RET(p && (MEM32(p - 4) & H_TAGMASK) == H_LIVE ? MEM32(p - 8) : 0xFFFFFFFFu, 3); }
 static void sh_HeapReAlloc(void) {
     /* (hHeap, flags, mem, size): in place when the block's class still fits */
     uint32_t flags = A32(1), oldva = A32(2), size = A32(3);
     if (!oldva) RET(heap_alloc(size), 4);
+    if ((MEM32(oldva - 4) & H_TAGMASK) != H_LIVE) { ds_set_last_error(87); RET(0, 4); }   /* not ours */
     uint32_t old = MEM32(oldva - 8);
     if (size <= h_cap(oldva)) {
         if ((flags & 0x8) && size > old) memset(ds_hostptr(oldva + old), 0, size - old);
