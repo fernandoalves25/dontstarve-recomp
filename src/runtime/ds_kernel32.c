@@ -127,14 +127,34 @@ static uint32_t heap_alloc(uint32_t size) {
     g_heap_live += cap;
     return va;
 }
+/* Freed blocks wait in a FIFO quarantine (up to H_QUAR_BYTES / H_QUAR_N)
+ * before their class reuses them: the game reads some objects shortly after
+ * freeing them, which the Windows heap tolerates because it does not hand a
+ * block straight back out. With immediate LIFO reuse, starting a new game
+ * crashed on a stale vector (DS_HEAP_NOREUSE=1 confirmed it). */
+#define H_QUAR_N     65536u
+#define H_QUAR_BYTES (32u << 20)
+static uint32_t g_quar[H_QUAR_N], g_quar_head, g_quar_tail;
+static uint64_t g_quar_bytes;
+static void h_release(uint32_t va) {                /* quarantine -> its class's free list */
+    uint32_t c = MEM32(va - 4) & ~H_TAGMASK;
+    g_quar_bytes -= h_cap(va);
+    MEM32(va) = g_hfree[c]; g_hfree[c] = va;        /* large blocks keep their capacity at va - 12 */
+}
 static void heap_free(uint32_t va) {
     if (!va) return;
+    static int noreuse = -1;
+    if (noreuse < 0) { const char *e = getenv("DS_HEAP_NOREUSE"); noreuse = e && *e == '1'; }
     uint32_t w = MEM32(va - 4), c = w & ~H_TAGMASK;
     if ((w & H_TAGMASK) != H_LIVE || c == 0 || c >= H_NCLASS) return;   /* not a live block of ours */
-    g_heap_live -= h_cap(va);
-    MEM32(va) = g_hfree[c]; g_hfree[c] = va;        /* large blocks keep their capacity at va - 12 */
+    uint32_t cap = h_cap(va);
+    g_heap_live -= cap;
     MEM32(va - 8) = 0;
     MEM32(va - 4) = H_FREE | c;
+    if (noreuse) return;                            /* debug: never recycle (use-after-free hunt) */
+    g_quar[g_quar_tail++ % H_QUAR_N] = va; g_quar_bytes += cap;
+    while (g_quar_tail - g_quar_head > H_QUAR_N - 1 || g_quar_bytes > H_QUAR_BYTES)
+        h_release(g_quar[g_quar_head++ % H_QUAR_N]);
 }
 static void sh_HeapAlloc(void) {
     /* (hHeap, dwFlags, dwBytes) */
