@@ -68,7 +68,7 @@ fills in as the port progresses (measured with a `COVERAGE=1` build, see `script
 
 **Playing, with sound (M7 + M8).** A scripted headless run goes Play → New Game → Start, holds a
 direction key and **Wilson walks** across the map (grass, then the coast, "Pick Sapling" under the
-cursor) — **5,212 functions executed (4,521 in the game exe)**, exit code 0 after 6,000 frames.
+cursor) — **5,299 functions executed (4,601 in the game exe)**, exit code 0 after 6,000 frames.
 **Saving and loading work**: the save the game writes after world generation shows up as
 "Survival 1-1" and Continue loads it back into the same world. An 11,000-frame session ran through
 nightfall, Wilson's death in the dark and the "You are dead!" screen without a host error.
@@ -271,7 +271,7 @@ vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, ve
 
 **Jogando, com som (M7 + M8).** Uma execução headless roteirizada vai em Play → New Game → Start,
 segura uma tecla de direção e o **Wilson anda** pelo mapa (grama, depois a costa, "Pick Sapling"
-sob o cursor) — **5.212 funções executadas (4.521 no exe do jogo)**, código de saída 0 depois de
+sob o cursor) — **5.299 funções executadas (4.601 no exe do jogo)**, código de saída 0 depois de
 6.000 frames. **Salvar e carregar funcionam**: o save que o jogo grava depois de gerar o mundo
 aparece como "Survival 1-1" e o Continue carrega de volta o mesmo mundo. Uma sessão de 11.000
 frames passou pelo anoitecer, pela morte do Wilson no escuro e pela tela "You are dead!" sem erro
