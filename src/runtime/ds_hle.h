@@ -42,7 +42,9 @@ extern int g_ds_screen_w, g_ds_screen_h;
 static inline void    *ds_hostptr(uint32_t va) { return (void *)(uintptr_t)ADDR(va); }
 
 /* ---- arena allocator: hands out guest VAs backed by the reserved arena ---- */
-uint32_t ds_arena_alloc(uint32_t size, uint32_t align);   /* 0 on exhaustion */
+uint32_t ds_arena_alloc(uint32_t size, uint32_t align);
+uint32_t ds_arena_brk(void);                   /* the bump heap's top (diagnostics) */
+void     ds_heap_stats(void);                    /* DS_HEAP_STATS=N prints it every N frames */   /* 0 on exhaustion */
 void     ds_arena_reset_to(uint32_t va);                  /* rare: rewind bump pointer */
 
 /* ---- handle table: opaque uint32_t tokens (NOT host pointers) ---- */
@@ -95,6 +97,7 @@ void      ds_audio_event_param(uint32_t id, int idx, float value);
 int       ds_audio_category(const char *name);                  /* index, made on first use */
 void      ds_audio_category_volume(int idx, float vol);
 float     ds_audio_category_get(int idx);
+size_t    ds_audio_pcm_bytes(void);                             /* decoded audio held (diagnostics) */
 void      ds_audio_listener(float x, float y, float z);
 uint32_t  ds_frame_count(void);                           /* frames swapped so far (ds_gles.c) */
 void      ds_set_last_error(uint32_t err);                /* kernel32 GetLastError value */

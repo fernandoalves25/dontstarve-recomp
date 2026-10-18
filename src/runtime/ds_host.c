@@ -153,6 +153,7 @@ uint32_t ds_arena_alloc(uint32_t size, uint32_t align) {
     return va;
 }
 void ds_arena_reset_to(uint32_t va) { g_brk = va; }
+uint32_t ds_arena_brk(void) { return g_brk; }
 
 /* ============================================================ handle table
  * HANDLEs/HMODULEs/etc are opaque tokens, not host pointers (never truncated). */

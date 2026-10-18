@@ -192,6 +192,9 @@ static void sh_eglSwapBuffers(void) {            /* (dpy, surface) */
         fprintf(stderr, "[egl] DS_EXIT_AFTER_FRAMES=%d reached: exiting\n", exit_after);
         exit(0);                                 /* atexit writes the coverage */
     }
+    static int stats = -1;
+    if (stats < 0) { const char *e = getenv("DS_HEAP_STATS"); stats = e ? atoi(e) : 0; }
+    if (stats > 0 && g_frame % (uint32_t)stats == 0) ds_heap_stats();
     if (g_frame == 1 || g_frame % 120 == 0) {
         struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
         double sec = (double)(t.tv_sec - t0.tv_sec) + (double)(t.tv_nsec - t0.tv_nsec) / 1e9;

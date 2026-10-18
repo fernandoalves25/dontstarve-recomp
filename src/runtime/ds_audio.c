@@ -798,3 +798,4 @@ void ds_audio_category_volume(int idx, float vol) {
     pthread_mutex_unlock(&g_mix);
 }
 float ds_audio_category_get(int idx) { return idx >= 0 && idx < g_ncat ? g_cat[idx].vol : 1.0f; }
+size_t ds_audio_pcm_bytes(void) { return g_pcm_bytes; }
