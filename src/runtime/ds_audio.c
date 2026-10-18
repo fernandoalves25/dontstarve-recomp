@@ -509,14 +509,19 @@ static float g_lx, g_ly, g_lz;                   /* listener */
 static float g_master = 1.0f;
 static int g_audio_on = -1;
 
-/* Decoded PCM is kept under a budget (DS_AUDIO_MB, default 192): the least
+/* Decoded PCM is kept under a budget (DS_AUDIO_MB, default 192, 96 on aarch64): the least
  * recently started waves no voice is playing are dropped first. */
 static size_t g_pcm_bytes, g_pcm_cap; static uint32_t g_clock;
 static int decode_lru(wave *w) {
     w->used = ++g_clock;
     if (w->pcm) return 1;
     if (!decode(w)) return 0;
-    if (!g_pcm_cap) { const char *e = getenv("DS_AUDIO_MB"); g_pcm_cap = (size_t)(e && atoi(e) > 0 ? atoi(e) : 192) << 20; }
+#if defined(__aarch64__)
+    const int def_mb = 96;                          /* a 1 GB handheld */
+#else
+    const int def_mb = 192;
+#endif
+    if (!g_pcm_cap) { const char *e = getenv("DS_AUDIO_MB"); g_pcm_cap = (size_t)(e && atoi(e) > 0 ? atoi(e) : def_mb) << 20; }
     g_pcm_bytes += (size_t)w->frames * w->channels * 2;
     pthread_mutex_lock(&g_mix);                     /* the mixer may switch a looping voice's wave */
     while (g_pcm_bytes > g_pcm_cap) {

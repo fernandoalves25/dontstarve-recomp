@@ -229,7 +229,80 @@ static void sh_glClearColor(void)           { glClearColor(AF(0), AF(1), AF(2), 
 static void sh_glClearStencil(void)         { glClearStencil(I(0)); RETV(1); }
 static void sh_glColorMask(void)            { glColorMask((GLboolean)A32(0), (GLboolean)A32(1), (GLboolean)A32(2), (GLboolean)A32(3)); RETV(4); }
 static void sh_glCompileShader(void)        { glCompileShader(U(0)); RETV(1); }
+/* ---- DXT (S3TC) without the GPU's help
+ * Don't Starve's textures are DXT5 (a few DXT1). ANGLE took them as is; a GLES2
+ * driver without S3TC (the R36S's Mali-G31) cannot, so they are decoded here
+ * and uploaded uncompressed: RGBA4444 by default (half the memory of RGBA8),
+ * DS_SOFT_DXT=rgba8 for full precision, DS_SOFT_DXT=1 to force the path. */
+#define FMT_DXT1_RGB  0x83F0
+#define FMT_DXT1_RGBA 0x83F1
+#define FMT_DXT3      0x83F2
+#define FMT_DXT5      0x83F3
+static int g_soft_dxt = -1, g_dxt_rgba8;
+static int soft_dxt(void) {
+    if (g_soft_dxt < 0) {
+        const char *v = getenv("DS_SOFT_DXT"), *x = (const char *)glGetString(GL_EXTENSIONS);
+        g_dxt_rgba8 = v && !strcmp(v, "rgba8");
+        g_soft_dxt = (v && *v && strcmp(v, "0")) || !x || !strstr(x, "texture_compression_s3tc");
+        if (g_soft_dxt) fprintf(stderr, "[egl] no S3TC on this GPU: DXT textures decoded on the CPU (%s)\n", g_dxt_rgba8 ? "RGBA8" : "RGBA4444");
+    }
+    return g_soft_dxt;
+}
+static void rgb565(uint16_t c, uint8_t *o) {
+    o[0] = (uint8_t)(((c >> 11) & 31) * 255 / 31); o[1] = (uint8_t)(((c >> 5) & 63) * 255 / 63); o[2] = (uint8_t)((c & 31) * 255 / 31);
+}
+/* one 4x4 block -> 16 RGBA8 pixels */
+static void dxt_block(GLenum f, const uint8_t *b, uint8_t px[16][4]) {
+    const uint8_t *cb = f == FMT_DXT3 || f == FMT_DXT5 ? b + 8 : b;
+    uint16_t c0 = (uint16_t)(cb[0] | cb[1] << 8), c1 = (uint16_t)(cb[2] | cb[3] << 8);
+    uint8_t pal[4][4]; rgb565(c0, pal[0]); rgb565(c1, pal[1]);
+    pal[0][3] = pal[1][3] = pal[2][3] = 255; pal[3][3] = 255;
+    if (c0 > c1 || f == FMT_DXT3 || f == FMT_DXT5)
+        for (int k = 0; k < 3; k++) { pal[2][k] = (uint8_t)((2 * pal[0][k] + pal[1][k]) / 3); pal[3][k] = (uint8_t)((pal[0][k] + 2 * pal[1][k]) / 3); }
+    else {
+        for (int k = 0; k < 3; k++) { pal[2][k] = (uint8_t)((pal[0][k] + pal[1][k]) / 2); pal[3][k] = 0; }
+        if (f == FMT_DXT1_RGBA) pal[3][3] = 0;
+    }
+    uint32_t idx = (uint32_t)cb[4] | (uint32_t)cb[5] << 8 | (uint32_t)cb[6] << 16 | (uint32_t)cb[7] << 24;
+    for (int i = 0; i < 16; i++) memcpy(px[i], pal[(idx >> (2 * i)) & 3], 4);
+    if (f == FMT_DXT3)
+        for (int i = 0; i < 16; i++) px[i][3] = (uint8_t)(((b[i / 2] >> (4 * (i & 1))) & 15) * 17);
+    else if (f == FMT_DXT5) {
+        uint8_t a[8]; a[0] = b[0]; a[1] = b[1];
+        if (a[0] > a[1]) for (int k = 1; k < 7; k++) a[k + 1] = (uint8_t)(((7 - k) * a[0] + k * a[1]) / 7);
+        else { for (int k = 1; k < 5; k++) a[k + 1] = (uint8_t)(((5 - k) * a[0] + k * a[1]) / 5); a[6] = 0; a[7] = 255; }
+        uint64_t bits = 0; for (int k = 0; k < 6; k++) bits |= (uint64_t)b[2 + k] << (8 * k);
+        for (int i = 0; i < 16; i++) px[i][3] = a[(bits >> (3 * i)) & 7];
+    }
+}
+static int dxt_upload(GLenum target, GLint level, GLenum f, GLsizei w, GLsizei h, const uint8_t *d) {
+    if (f != FMT_DXT1_RGB && f != FMT_DXT1_RGBA && f != FMT_DXT3 && f != FMT_DXT5) return 0;
+    size_t bs = f == FMT_DXT3 || f == FMT_DXT5 ? 16 : 8;
+    int bw = (w + 3) / 4, bh = (h + 3) / 4;
+    void *out = malloc((size_t)w * (size_t)h * (g_dxt_rgba8 ? 4 : 2) + 16);
+    if (!out) return 0;
+    for (int by = 0; by < bh; by++)
+        for (int bx = 0; bx < bw; bx++) {
+            uint8_t px[16][4];
+            if (d) dxt_block(f, d + ((size_t)by * (size_t)bw + (size_t)bx) * bs, px); else memset(px, 0, sizeof px);
+            for (int i = 0; i < 16; i++) {
+                int x = bx * 4 + (i & 3), y = by * 4 + (i >> 2);
+                if (x >= w || y >= h) continue;
+                size_t o = (size_t)y * (size_t)w + (size_t)x;
+                if (g_dxt_rgba8) memcpy((uint8_t *)out + 4 * o, px[i], 4);
+                else ((uint16_t *)out)[o] = (uint16_t)((px[i][0] >> 4) << 12 | (px[i][1] >> 4) << 8 | (px[i][2] >> 4) << 4 | (px[i][3] >> 4));
+            }
+        }
+    GLint align; glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, g_dxt_rgba8 ? 4 : 2);
+    glTexImage2D(target, level, GL_RGBA, w, h, 0, GL_RGBA, g_dxt_rgba8 ? GL_UNSIGNED_BYTE : GL_UNSIGNED_SHORT_4_4_4_4, out);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, align);
+    free(out);
+    return 1;
+}
+
 static void sh_glCompressedTexImage2D(void) { /* (target, level, ifmt, w, h, border, imageSize, data) */
+    if (soft_dxt() && dxt_upload(E(0), I(1), E(2), I(3), I(4), (const uint8_t *)P(7))) RETV(8);
     glCompressedTexImage2D(E(0), I(1), E(2), I(3), I(4), I(5), I(6), P(7)); RETV(8);
 }
 static void sh_glCreateProgram(void)        { RET(glCreateProgram(), 0); }
@@ -272,8 +345,12 @@ static void sh_glGetString(void) {          /* host string -> a guest copy, cach
     for (int i = 0; i < n; i++) if (cache[i].e == e) RET(cache[i].va, 1);
     const char *s = (const char *)glGetString(e);
     if (!s) RET(0, 1);
-    uint32_t len = (uint32_t)strlen(s) + 1, va = ds_arena_alloc(len, 4);
+    static const char dxt[] = " GL_EXT_texture_compression_dxt1 GL_ANGLE_texture_compression_dxt3"
+                              " GL_ANGLE_texture_compression_dxt5 GL_EXT_texture_compression_s3tc";
+    int add = e == GL_EXTENSIONS && soft_dxt();                 /* decoded here, so still on offer */
+    uint32_t len = (uint32_t)strlen(s) + 1, va = ds_arena_alloc(len + (add ? (uint32_t)sizeof dxt : 0), 4);
     memcpy(ds_hostptr(va), s, len);
+    if (add) memcpy((char *)ds_hostptr(va) + len - 1, dxt, sizeof dxt);
     if (n < 16) { cache[n].e = e; cache[n].va = va; n++; }
     RET(va, 1);
 }

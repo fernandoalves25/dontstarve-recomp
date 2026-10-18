@@ -62,7 +62,7 @@ fills in as the port progresses (measured with a `COVERAGE=1` build, see `script
 | M6 Native main menu — the recompiled game draws its menu (headless x86-64 + Mesa) | ✅ done |
 | **M7 Stability** | 🟡 **in progress — a new world generates and loads; Wilson walks, picks up items; 6,000-frame sessions exit cleanly** |
 | **M8 Audio (FMOD Ex shim)** | 🟡 **in progress — real sound: the game's `.fev` events → FSB5 Vorbis waves → SDL mixer, 3D pan/attenuation** |
-| **M9 PortMaster package + FPS vs box64** | 🟡 **aarch64 build (glibc 2.17) runs under qemu; needs a real R36S** |
+| **M9 PortMaster package + FPS vs box64** | 🟡 **aarch64 build (glibc 2.17) runs under qemu with sound; package from [scripts/make_port.sh](scripts/make_port.sh); needs a real R36S** |
 
 ### 🙋 Where help is needed
 
@@ -72,7 +72,11 @@ cursor) — **5,212 functions executed (4,521 in the game exe)**, exit code 0 af
 The FMOD shim now **makes sound** ([ds_audio.c](src/runtime/ds_audio.c), `DS_AUDIO=sdl`): it reads
 the game's own `.fev` project files (2,300+ events → sound definitions → waves), plays the waves out
 of the 50 FSB5 banks (7,571 Vorbis streams) through an SDL mixer with 32 voices and 3D
-pan/attenuation from the listener. FSB5 strips the Vorbis setup headers; the host rebuilds them with
+pan/attenuation from the listener. Events follow their FEV data: each layer has its own voice and
+plays while its parameter is in range (the `daytime` ambience switches day/night layers), loop
+modes, per-definition volume and spawn intervals (ocean waves, random bird and wind ambience), and
+the category volumes the game's mixer sets (`set_music/soundtrack`, `set_sfx/voice`, pause and
+death mixes). Decoded audio stays under a memory budget (`DS_AUDIO_MB`, default 192, 96 on aarch64). FSB5 strips the Vorbis setup headers; the host rebuilds them with
 libvorbis's own encoder and checks each against the bank's CRC32 (cached in
 `$DS_HOME_DIR/vorbis_setups.bin`). The low-rate (8–24 kHz) setups came out of another encoder
 build; [tools/audio/import_setups.py](tools/audio/import_setups.py) takes them from
@@ -114,6 +118,9 @@ What's in the runtime now ([src/runtime](src/runtime)):
 - **File I/O** ([ds_file.c](src/runtime/ds_file.c)): `Z:\dontstarve\…` → `$DS_GAME_DIR` (default
   `gamedata/`: your install's `bin/`, `data/`, `mods/`), `Z:\home\…` → `$DS_HOME_DIR` (default
   `build/home/`). Case-insensitive, as on Windows. `DS_FILE_TRACE=1` logs every open.
+- **DXT without S3TC:** the game's textures are DXT5/DXT1; on a GPU without S3TC (the R36S's
+  Mali-G31) the bridge decodes them on the CPU and uploads RGBA4444 (`DS_SOFT_DXT=rgba8` for full
+  precision, `DS_SOFT_DXT=1` forces it; checked against the GPU path: max error 21/255).
 - **SDL2** ([ds_sdl.c](src/runtime/ds_sdl.c), `DS_VIDEO=sdl`): window + GLES2 context, events into
   the message queue, the SDL game controller as XInput pad 0. **Input** ([ds_input.c](src/runtime/ds_input.c)).
   `DS_INPUT="F click X Y; F key VK"` scripts a headless run.
@@ -135,8 +142,9 @@ Help wanted, in order:
 - **Regenerating the low-rate Vorbis setups ourselves:** 6 of the 20 setup headers (8–24 kHz) match
   no libvorbis 1.3.x VBR setting tried (every rate 4–52 kHz × quality −0.1…1.0); for now they
   come from python-fsb5's table.
-- **Complex FMOD events:** event parameters drive which layer plays (day/night ambience, music
-  intensity); the host plays the first layer of each.
+- **FMOD envelopes:** layers and parameters work, but the envelope curves (volume/pitch against a
+  parameter) are not decoded yet; a full-range enveloped layer just fades with its parameter
+  (music `intensity`).
 - **Long play sessions:** days, nights, seasons, saving and loading.
 
 Runtime fixes on the way (useful for anyone using pcrecomp): import-stub names were dangling
@@ -245,7 +253,7 @@ vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, ve
 | M6 Menu principal nativo — o jogo recompilado desenha o menu (headless x86-64 + Mesa) | ✅ feito |
 | **M7 Estabilidade** | 🟡 **em progresso — um mundo novo é gerado e carregado; o Wilson anda e pega itens; sessões de 6.000 frames saem limpas** |
 | **M8 Áudio (shim do FMOD Ex)** | 🟡 **em progresso — som de verdade: eventos dos `.fev` do jogo → ondas FSB5 Vorbis → mixer SDL, pan/atenuação 3D** |
-| **M9 Pacote PortMaster + FPS vs box64** | 🟡 **build aarch64 (glibc 2.17) roda sob qemu; precisa de um R36S de verdade** |
+| **M9 Pacote PortMaster + FPS vs box64** | 🟡 **build aarch64 (glibc 2.17) roda sob qemu com som; pacote via [scripts/make_port.sh](scripts/make_port.sh); precisa de um R36S de verdade** |
 
 ### 🙋 Onde precisamos de ajuda
 
@@ -255,7 +263,12 @@ sob o cursor) — **5.212 funções executadas (4.521 no exe do jogo)**, código
 6.000 frames. O shim do FMOD agora **faz som** ([ds_audio.c](src/runtime/ds_audio.c),
 `DS_AUDIO=sdl`): ele lê os próprios arquivos de projeto `.fev` do jogo (mais de 2.300 eventos →
 definições de som → ondas), toca as ondas dos 50 bancos FSB5 (7.571 streams Vorbis) num mixer SDL
-de 32 vozes com pan/atenuação 3D a partir do ouvinte. O FSB5 remove os cabeçalhos de setup do
+de 32 vozes com pan/atenuação 3D a partir do ouvinte. Os eventos seguem os dados do FEV: cada camada tem
+a própria voz e toca enquanto o parâmetro está na faixa (o ambiente `daytime` troca as camadas de
+dia/noite), modos de loop, volume e intervalos de spawn por definição (ondas do mar, ambiente
+aleatório de pássaros e vento) e os volumes de categoria que o mixer do jogo define
+(`set_music/soundtrack`, `set_sfx/voice`, mixes de pausa e morte). O áudio decodificado fica dentro
+de um orçamento de memória (`DS_AUDIO_MB`, padrão 192, 96 no aarch64). O FSB5 remove os cabeçalhos de setup do
 Vorbis; o host os reconstrói com o próprio encoder da libvorbis e confere cada um contra o CRC32 do
 banco (cache em `$DS_HOME_DIR/vorbis_setups.bin`). Os setups de taxa baixa (8–24 kHz) vieram de outro
 build do encoder; o [tools/audio/import_setups.py](tools/audio/import_setups.py) os pega da tabela
@@ -299,6 +312,9 @@ O que já existe no runtime ([src/runtime](src/runtime)):
   (padrão `gamedata/`: o `bin/`, `data/` e `mods/` da sua instalação), `Z:\home\…` →
   `$DS_HOME_DIR` (padrão `build/home/`). Sem diferenciar maiúsculas, como no Windows.
   `DS_FILE_TRACE=1` registra cada abertura.
+- **DXT sem S3TC:** as texturas do jogo são DXT5/DXT1; numa GPU sem S3TC (a Mali-G31 do R36S) a
+  ponte as decodifica na CPU e envia RGBA4444 (`DS_SOFT_DXT=rgba8` para precisão total,
+  `DS_SOFT_DXT=1` força; conferido contra o caminho da GPU: erro máximo 21/255).
 - **SDL2** ([ds_sdl.c](src/runtime/ds_sdl.c), `DS_VIDEO=sdl`): janela + contexto GLES2, eventos na
   fila de mensagens, o controle SDL como pad XInput 0. **Input** ([ds_input.c](src/runtime/ds_input.c)).
   `DS_INPUT="F click X Y; F key VK"` roteiriza uma execução headless.
@@ -322,8 +338,9 @@ Procura-se ajuda, nesta ordem:
 - **Regenerar nós mesmos os setups Vorbis de taxa baixa:** 6 dos 20 cabeçalhos (8–24 kHz) não batem
   com nenhuma configuração VBR da libvorbis 1.3.x testada (toda taxa de 4–52 kHz × qualidade
   −0,1…1,0); por enquanto vêm da tabela do python-fsb5.
-- **Eventos FMOD complexos:** os parâmetros do evento escolhem a camada que toca (ambiente de
-  dia/noite, intensidade da música); o host toca a primeira camada de cada um.
+- **Envelopes do FMOD:** camadas e parâmetros funcionam, mas as curvas de envelope (volume/pitch em
+  função de um parâmetro) ainda não são decodificadas; uma camada com envelope que cobre a faixa
+  inteira só acompanha o parâmetro no volume (`intensity` da música).
 - **Sessões longas de jogo:** dias, noites, estações, salvar e carregar.
 
 Correções de runtime no caminho (úteis para quem usa o pcrecomp): os nomes dos stubs de import
