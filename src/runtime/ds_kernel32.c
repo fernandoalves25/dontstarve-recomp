@@ -78,13 +78,57 @@ static void sh_ExitProcess(void) { fprintf(stderr, "[ds] guest ExitProcess(%u)\n
 static void sh_GetProcessHeap(void) { RET(ds_handle_new(HK_HEAP, 0), 0); }
 static void sh_HeapCreate(void)     { RET(ds_handle_new(HK_HEAP, 0), 3); }
 static void sh_HeapDestroy(void)    { RET(1, 1); }
-/* Bump allocator with an 8-byte header holding the block size, so HeapSize
- * (the CRT's _msize, e.g. when it grows the onexit table) and HeapReAlloc's
- * copy see the real size. Blocks stay 8-aligned. */
+/* The guest heap: blocks carved from the arena, recycled through free lists.
+ * Header (8 bytes, keeps 8-byte alignment): +0 the size asked for (HeapSize,
+ * the CRT's _msize), +4 the block's size class. Classes: small blocks in
+ * 16-byte steps up to 4 KB, medium in 4 KB pages up to 1 MB, large in 64 KB
+ * steps (best fit from one list). A freed block goes back to its class and
+ * is reused as is -- no coalescing, which load/unload cycles tolerate.
+ * (A bump allocator with a no-op HeapFree ran out of arena while the game
+ * loaded its first world.) Shims run under the machine lock: no locking. */
+#define H_SMALL_MAX   4096u
+#define H_MEDIUM_MAX  (1u << 20)
+#define H_NCLASS      (256 + 256 + 1)
+#define H_LARGE       (H_NCLASS - 1)
+static uint32_t g_hfree[H_NCLASS];                  /* free list heads (block VAs; link in payload +0) */
+static uint64_t g_heap_live;                        /* bytes handed out and not freed (diagnostics) */
+static uint32_t h_class(uint32_t size, uint32_t *cap) {
+    if (size <= H_SMALL_MAX) { uint32_t r = (size + 15u) & ~15u; if (!r) r = 16; *cap = r; return r / 16u; }
+    if (size <= H_MEDIUM_MAX) { uint32_t r = (size + 4095u) & ~4095u; *cap = r; return 256u + r / 4096u; }
+    *cap = (size + 0xFFFFu) & ~0xFFFFu; return H_LARGE;
+}
+static uint32_t h_cap(uint32_t va) {                /* capacity of a live block, from its class */
+    uint32_t c = MEM32(va - 4);
+    if (c < 256 + 1) return c * 16u;
+    if (c < H_LARGE) return (c - 256u) * 4096u;
+    return MEM32(va - 12);                          /* large: capacity kept in a second header word */
+}
 static uint32_t heap_alloc(uint32_t size) {
-    uint32_t va = ds_arena_alloc((size ? size : 1) + 8u, 8) + 8u;
-    MEM32(va - 8) = size;
+    uint32_t cap, c = h_class(size, &cap), va = 0;
+    if (c != H_LARGE) {
+        if ((va = g_hfree[c])) g_hfree[c] = MEM32(va);
+        else va = ds_arena_alloc(cap + 8u, 8) + 8u;
+    } else {                                        /* best fit among the free large blocks */
+        uint32_t *link = &g_hfree[H_LARGE], *best = NULL;
+        for (uint32_t b = *link; b; link = (uint32_t *)ds_hostptr(b), b = *link) {
+            uint32_t bc = MEM32(b - 12);
+            if (bc >= cap && (!best || bc < MEM32(*best - 12))) best = link;
+        }
+        if (best) { va = *best; *best = MEM32(va); cap = MEM32(va - 12); }
+        else { va = ds_arena_alloc(cap + 16u, 16) + 16u; MEM32(va - 12) = cap; }
+    }
+    MEM32(va - 8) = size; MEM32(va - 4) = c;
+    g_heap_live += cap;
     return va;
+}
+static void heap_free(uint32_t va) {
+    if (!va) return;
+    uint32_t c = MEM32(va - 4);
+    if (c == 0 || c >= H_NCLASS) return;            /* not one of ours: ignore */
+    g_heap_live -= h_cap(va);
+    MEM32(va) = g_hfree[c]; g_hfree[c] = va;        /* large blocks keep their capacity at va - 12 */
+    MEM32(va - 8) = 0;
+    MEM32(va - 4) = c | 0x80000000u;                /* marked free: a double free is ignored above */
 }
 static void sh_HeapAlloc(void) {
     /* (hHeap, dwFlags, dwBytes) */
@@ -93,15 +137,23 @@ static void sh_HeapAlloc(void) {
     if (flags & 0x8) memset(ds_hostptr(va), 0, size);  /* HEAP_ZERO_MEMORY */
     RET(va, 3);
 }
-static void sh_HeapFree(void)   { RET(1, 3); }
+static void sh_HeapFree(void)   { heap_free(A32(2)); RET(1, 3); }
 static void sh_HeapSize(void)   { uint32_t p = A32(2); RET(p ? MEM32(p - 8) : 0xFFFFFFFFu, 3); }
 static void sh_HeapReAlloc(void) {
-    /* (hHeap, flags, mem, size): new block + copy of min(old, new) */
+    /* (hHeap, flags, mem, size): in place when the block's class still fits */
     uint32_t flags = A32(1), oldva = A32(2), size = A32(3);
+    if (!oldva) RET(heap_alloc(size), 4);
+    uint32_t old = MEM32(oldva - 8);
+    if (size <= h_cap(oldva)) {
+        if ((flags & 0x8) && size > old) memset(ds_hostptr(oldva + old), 0, size - old);
+        MEM32(oldva - 8) = size;
+        RET(oldva, 4);
+    }
+    if (flags & 0x10) RET(0, 4);                   /* HEAP_REALLOC_IN_PLACE_ONLY */
     uint32_t va = heap_alloc(size);
-    uint32_t old = oldva ? MEM32(oldva - 8) : 0;
-    if (oldva) memcpy(ds_hostptr(va), ds_hostptr(oldva), old < size ? old : size);
+    memcpy(ds_hostptr(va), ds_hostptr(oldva), old < size ? old : size);
     if ((flags & 0x8) && size > old) memset(ds_hostptr(va + old), 0, size - old);
+    heap_free(oldva);
     RET(va, 4);
 }
 

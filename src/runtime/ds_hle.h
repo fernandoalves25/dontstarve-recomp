@@ -67,6 +67,7 @@ uint32_t  ds_last_import_va(void);                        /* inside a shim: the 
 void      mach_enter(void);
 void      mach_leave(void);
 int       ds_block_begin(void);                           /* release the machine around a blocking call */
+void      ds_yield(void);                                 /* preemption point: let a waiting guest thread run */
 void      ds_block_end(int depth);
 uint32_t  hle_call_guest(uint32_t va, int nargs, const uint32_t *args);
 

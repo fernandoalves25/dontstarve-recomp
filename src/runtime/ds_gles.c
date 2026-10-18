@@ -168,6 +168,7 @@ static void sh_eglSwapBuffers(void) {            /* (dpy, surface) */
     g_frame++;
     if (every > 0 && g_frame % (uint32_t)every == 0) dump_frame(g_frame);
     EGLBoolean ok = s ? eglSwapBuffers(g_dpy, s) : EGL_FALSE;
+    ds_yield();                                  /* a frame is a natural preemption point */
     static int exit_after = -1;
     if (exit_after < 0) { const char *e = getenv("DS_EXIT_AFTER_FRAMES"); exit_after = e ? atoi(e) : 0; }
     if (exit_after > 0 && g_frame >= (uint32_t)exit_after) {

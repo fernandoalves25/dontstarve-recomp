@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <time.h>
 #include "ds_hle.h"
 #include "pe_format.h"
 
@@ -233,8 +234,20 @@ static uint32_t make_tib(uint32_t stack_lo, uint32_t stack_hi) {
 typedef struct { regs_t r; int depth, inited; } mstate;
 static __thread mstate g_ms;
 
+/* Fair hand-over: how many threads wait for the machine, and how many times it
+ * changed hands (a yielding thread retakes it only after someone else had it). */
+static volatile int g_mach_waiters;
+static volatile uint32_t g_mach_gen;
+static void mach_lock(void) {
+    if (pthread_mutex_trylock(&g_mach) != 0) {
+        __atomic_add_fetch(&g_mach_waiters, 1, __ATOMIC_SEQ_CST);
+        pthread_mutex_lock(&g_mach);
+        __atomic_sub_fetch(&g_mach_waiters, 1, __ATOMIC_SEQ_CST);
+    }
+    __atomic_add_fetch(&g_mach_gen, 1, __ATOMIC_SEQ_CST);
+}
 void mach_enter(void) {
-    pthread_mutex_lock(&g_mach);
+    if (g_ms.depth == 0) mach_lock(); else pthread_mutex_lock(&g_mach);
     if (!g_ms.inited) {
         uint32_t lo = ds_arena_alloc(GUEST_STACK, 0x1000);
         g_ms.r.esp    = lo + GUEST_STACK - 64;
@@ -261,9 +274,24 @@ int ds_block_begin(void) {
     return d;
 }
 void ds_block_end(int d) {
-    for (int i = 0; i < d; i++) pthread_mutex_lock(&g_mach);
+    if (d > 0) { mach_lock(); for (int i = 1; i < d; i++) pthread_mutex_lock(&g_mach); }
     g_ms.depth = d;
     regs_load(&g_ms.r);
+}
+
+/* A preemption point (RECOMP_BACKEDGE every RECOMP_YIELD_EVERY loop back-edges,
+ * and every swapped frame): if another guest thread waits for the machine,
+ * hand it over and take it back once it has been taken. Without this the
+ * render loop never blocks, and the WorldSim thread that generates a new
+ * world never ran at all. */
+void ds_yield(void) {
+    if (__atomic_load_n(&g_mach_waiters, __ATOMIC_SEQ_CST) == 0) return;
+    uint32_t gen = __atomic_load_n(&g_mach_gen, __ATOMIC_SEQ_CST);
+    int d = ds_block_begin();
+    for (int i = 0; i < 2000 && __atomic_load_n(&g_mach_gen, __ATOMIC_SEQ_CST) == gen; i++) {
+        struct timespec t = { 0, 50000 }; nanosleep(&t, NULL);   /* until someone took it (<= 100 ms) */
+    }
+    ds_block_end(d);
 }
 
 /* ============================================================ setjmp/longjmp
@@ -669,6 +697,7 @@ int main(int argc, char **argv) {
     ds_register_manual(0x7855AE20u, ds_memmove);       /* msvcr90 memcpy */
     ds_register_manual(0x7855B310u, ds_memmove);       /* msvcr90 memmove */
     ds_register_manual(0x785947D8u, ds_longjmp);       /* msvcr90 longjmp */
+    recomp_yield_hook = ds_yield;                      /* RECOMP_BACKEDGE preemption point */
     fprintf(stderr, "[ds] registered %d HLE shims; lifted DLLs: msvcr90=%d msvcp90=%d\n",
             g_shim_n, have_r, have_p);
 
