@@ -4,7 +4,7 @@
 set -u
 cd "$(dirname "$0")/.."
 mkdir -p build/obj
-HOSTDEFS="-DRECOMP_STRICT_ICALL -DRECOMP_LOCAL_REGS -DRECOMP_MEM_QUAL="
+HOSTDEFS="-DRECOMP_STRICT_ICALL -DRECOMP_LOCAL_REGS -DRECOMP_MEM_QUAL= -DRECOMP_RETADDR=0u"
 HOSTINC="-I pcrecomp/runtime/recomp32 -I pcrecomp/runtime/win32hle -I src/runtime"
 for f in ds_host ds_kernel32; do
     echo "=== compile $f.c ==="

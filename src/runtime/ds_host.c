@@ -198,6 +198,7 @@ recomp_func_t recomp_lookup_manual(uint32_t va) {
  * equivalent frame + SEH record, never treating the sentinel as a real address.
  * On entry g_esp points at the (sentinel) return-addr slot P, g_eax = scopetable. */
 static void ds_eh_prolog(void) {
+    static int n; if (n++ < 3) fprintf(stderr, "[ds] ds_eh_prolog #%d esp=%08X ebp=%08X eax=%08X caller=%08X\n", n, g_esp, g_ebp, g_eax, g_cur_func);
     uint32_t P = g_esp;
     uint32_t scopetable = g_eax;
     uint32_t old_fs0 = MEM32(g_fs_base + 0);
