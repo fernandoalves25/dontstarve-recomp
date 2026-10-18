@@ -192,8 +192,28 @@ static void sh_Ev_getState(void) {                        /* READY, plus PLAYING
     if (A32(1)) MEM32(A32(1)) = FMOD_EVENT_STATE_READY | (ds_audio_event_playing(EV_ID()) ? 0x8u : 0u);
     RET(FMOD_OK, 2);
 }
-static void sh_Ev_getParameter(void){ out_obj(A32(2), FO_PARAM); RET(FMOD_OK, 3); }   /* (this, name, EventParameter **) */
-static void sh_EvP_setValue(void)   { RET(FMOD_OK, 2); }  /* (this, float) */
+/* EventParameter objects: +8 the event's audio id, +4 the parameter index.
+ * The game asks for one on every SetParameter, so they are kept per event slot
+ * (and one shared object for unknown names) instead of allocated each time. */
+static uint32_t g_pobj[DS_AUDIO_MAXEV][4], g_pnone;
+static void sh_Ev_getParameter(void) {                    /* (this, name, EventParameter **) */
+    uint32_t id = EV_ID(), o;
+    int k = id ? ds_audio_event_param_index(id, ASTR(1)) : -1;
+    if (id < DS_AUDIO_MAXEV && k >= 0 && k < 4) {
+        if (!g_pobj[id][k]) g_pobj[id][k] = obj_new(FO_PARAM);
+        o = g_pobj[id][k]; MEM32(o + 8) = id; MEM32(o + 4) = (uint32_t)k;
+    } else {
+        if (!g_pnone) g_pnone = obj_new(FO_PARAM);
+        o = g_pnone;
+    }
+    if (A32(2)) MEM32(A32(2)) = o;
+    RET(FMOD_OK, 3);
+}
+static void sh_EvP_setValue(void) {                       /* (this, float) */
+    uint32_t o = A32(0);
+    if (o && o != g_pnone) ds_audio_event_param(MEM32(o + 8), (int)MEM32(o + 4), AF32(1));
+    RET(FMOD_OK, 2);
+}
 
 /* ===================== FMOD Ex low level */
 static void sh_Sys_setFileSystem(void)      { RET(FMOD_OK, 8); }  /* (this, open, close, read, seek, asyncread, asynccancel, blockalign) */
