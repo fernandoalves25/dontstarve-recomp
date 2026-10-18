@@ -88,7 +88,7 @@ const T = {
   title:"Don't Starve — Native ARM64 recompilation for R36S",
   sub:"Static recompilation of the Windows EXE (x86-32) into native C99 via pcrecomp — no box64, no runtime emulation. Keeps all DLCs, mods, the PT-BR translation and the PC UI.",
   bRan:"Executed at runtime", bFns:"Functions lifted", bFail:"Lift failures", bImp:"Imports resolved", bPhase:"Phase",
-  phase:"GLES2 up, FMOD next",
+  phase:"In a world; R36S build next",
   hLift:"How much actually runs — by module",
   lgLift:"ran at runtime", lgPrune:"lifted, not run yet", lgCell:"each cell ≈ 16 functions — lifting is the easy part; running is the real progress",
   fns:"fns", pruned:"pruned",
@@ -106,14 +106,14 @@ const T = {
    ["Audio (FMOD Ex shim)","FSB5/Vorbis banks"],
    ["PortMaster package + FPS","vs the ~20–22 FPS box64 ceiling"]],
   hHelp:"Where the community can help",
-  help:"<b>Current wall: <code>FMOD_EventSystem_Create</code>, the first audio call.</b> The port lifts the game's DRM-free standalone build (<code>dontstarve.exe</code>, 16,146 functions, 0 lift failures). Execution reaches 1,335 functions (787 in the game exe). The game creates its window, brings up EGL + GLES2 for real through the new ANGLE bridge (9 EGL + 76 GLES2 imports by ordinal, onto native EGL/GLES2; headless pbuffer for now), queries its texture formats, enumerates input devices and reaches <code>DoGameSpecificInitialize()</code>. Lifter patch 0016 adds the x87 <code>fcomi</code>/<code>fucomi</code> compares (3,835 sites); pcrecomp's difftest matches hardware on 263/263 cases.<br><br>Help wanted: the FMOD Ex + FMOD Event shim (silent first, then SDL audio with FSB banks), and SDL2/KMSDRM behind the window, the EGL surface and the input layer for the R36S.",
+  help:"<b>Playing, with sound.</b> The recompiled <code>dontstarve.exe</code> (DRM-free standalone build, 16,146 functions, 0 lift failures) boots, draws its main menu and, driven by scripted input, generates a new world, loads it and Wilson walks across it: 5,299 functions executed, clean exit after 6,000 frames. The FMOD shim now makes real sound: the game's own .fev events resolve to waves in its FSB5 Vorbis banks, mixed by SDL with 3D pan and attenuation. The aarch64 build (glibc 2.17) links and plays the menu music under qemu.<br><br>Help wanted: running it on a real R36S (SDL2 over KMSDRM on the Mali GPU, FPS against box64), regenerating the 6 low-rate Vorbis setup headers ourselves (they come from python-fsb5's table for now), FMOD envelope curves, and long play sessions (seasons, save/load). A PortMaster package is built by scripts/make_port.sh.",
   legal:"<b>Legal:</b> this repository contains only original tooling and runtime — <b>no game binaries, assets or code</b>. You need your own legal copy of Don't Starve. Lifted C and all game material stay local (git-ignored). Don't Starve © Klei Entertainment; not affiliated with Klei. · Tooling under the MIT license."
  },
  pt:{
   title:"Don't Starve — Recompilação nativa ARM64 para R36S",
   sub:"Recompilação estática do EXE Windows (x86-32) para C99 nativo via pcrecomp — sem box64, sem emulação em runtime. Preserva todas as DLCs, mods, a tradução PT-BR e a UI de PC.",
   bRan:"Executadas em runtime", bFns:"Funções liftadas", bFail:"Falhas de lift", bImp:"Imports resolvidos", bPhase:"Fase",
-  phase:"GLES2 ok, FMOD a seguir",
+  phase:"Num mundo; build R36S a seguir",
   hLift:"Quanto realmente roda — por módulo",
   lgLift:"rodou em runtime", lgPrune:"liftada, ainda não rodou", lgCell:"cada célula ≈ 16 funções — liftar é a parte fácil; rodar é o progresso real",
   fns:"fns", pruned:"podadas",
@@ -131,7 +131,7 @@ const T = {
    ["Áudio (shim do FMOD Ex)","banks FSB5/Vorbis"],
    ["Pacote PortMaster + FPS","vs o teto de ~20–22 FPS do box64"]],
   hHelp:"Onde a comunidade pode ajudar",
-  help:"<b>Parede atual: <code>FMOD_EventSystem_Create</code>, a primeira chamada de áudio.</b> O port lifta o build standalone DRM-free do jogo (<code>dontstarve.exe</code>, 16.146 funções, 0 falhas de lift). A execução chega a 1.335 funções (787 no exe do jogo). O jogo cria a janela, sobe EGL + GLES2 de verdade pela nova ponte do ANGLE (9 imports EGL + 76 GLES2 por ordinal, para EGL/GLES2 nativo; pbuffer headless por enquanto), consulta os formatos de textura, enumera os dispositivos de input e chega ao <code>DoGameSpecificInitialize()</code>. O patch 0016 do lifter adiciona as comparações x87 <code>fcomi</code>/<code>fucomi</code> (3.835 pontos); o difftest do pcrecomp bate com o hardware em 263/263 casos.<br><br>Procura-se ajuda: o shim do FMOD Ex + FMOD Event (primeiro mudo, depois áudio SDL com bancos FSB), e SDL2/KMSDRM por trás da janela, da superfície EGL e da camada de input para o R36S.",
+  help:"<b>Jogando, com som.</b> O <code>dontstarve.exe</code> recompilado (build standalone DRM-free, 16.146 funções, 0 falhas de lift) inicializa, desenha o menu principal e, com input roteirizado, gera um mundo novo, carrega e o Wilson anda por ele: 5.299 funções executadas, saída limpa depois de 6.000 frames. O shim do FMOD agora faz som de verdade: os eventos dos .fev do próprio jogo viram ondas dos bancos FSB5 Vorbis, mixadas pelo SDL com pan e atenuação 3D. O build aarch64 (glibc 2.17) linka e toca a música do menu sob qemu.<br><br>Procura-se ajuda: rodar num R36S de verdade (SDL2 sobre KMSDRM na GPU Mali, FPS comparado ao box64), regenerar nós mesmos os 6 cabeçalhos de setup Vorbis de taxa baixa (por enquanto vêm da tabela do python-fsb5), as curvas de envelope do FMOD e sessões longas (estações, salvar/carregar). O pacote PortMaster sai do scripts/make_port.sh.",
   legal:"<b>Legal:</b> este repositório contém apenas ferramentas e runtime originais — <b>nenhum binário, asset ou código do jogo</b>. Você precisa da sua própria cópia legítima de Don't Starve. O C liftado e todo material do jogo ficam locais (fora do git). Don't Starve © Klei Entertainment; sem afiliação com a Klei. · Ferramentas sob licença MIT."
  }
 };

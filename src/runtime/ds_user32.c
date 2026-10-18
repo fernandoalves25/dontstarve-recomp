@@ -304,7 +304,7 @@ static void sh_GetUserObjectInformationW(void) { /* (h, nIndex, pvInfo, nLength,
 }
 
 /* ===================== cursor, icons, keyboard */
-static int32_t g_cur_x = DS_SCREEN_W / 2, g_cur_y = DS_SCREEN_H / 2;
+static int32_t g_cur_x = -1, g_cur_y = -1;   /* screen centre until SetCursorPos */
 static uint32_t g_cursor;
 static void sh_LoadCursorA(void) { RET(ds_handle_new(HK_CURSOR, 0), 2); }
 static void sh_LoadIconA(void)   { RET(ds_handle_new(HK_ICON, 0), 2); }
@@ -312,6 +312,7 @@ static void sh_SetCursor(void)   { uint32_t old = g_cursor; g_cursor = A32(0); R
 static void sh_ClipCursor(void)  { RET(1, 1); }
 static void sh_GetCursorPos(void) {
     uint32_t p = A32(0);
+    if (g_cur_x < 0) { g_cur_x = DS_SCREEN_W / 2; g_cur_y = DS_SCREEN_H / 2; }
     if (p) { MEM32(p) = (uint32_t)g_cur_x; MEM32(p + 4) = (uint32_t)g_cur_y; }
     RET(1, 1);
 }
@@ -345,8 +346,82 @@ static void sh_MapVirtualKeyA(void) {        /* (uCode, uMapType) */
     RET(r, 2);
 }
 
-/* ===================== message queue: empty (the fake window gets no input yet) */
-static void sh_PeekMessageA(void)    { RET(0, 5); }   /* (MSG*, hwnd, min, max, wRemoveMsg) */
+/* ===================== message queue
+ * Empty, except for a scripted input: DS_INPUT="F click X Y; F key VK; F hold VK N; ..."
+ * posts, once frame F has been swapped, a mouse move + left click at (X, Y)
+ * or a key press of virtual key VK -- how a headless run gets past menus. */
+#define WM_KEYDOWN     0x0100u
+#define WM_KEYUP       0x0101u
+#define WM_CHAR        0x0102u
+#define WM_MOUSEMOVE   0x0200u
+#define WM_LBUTTONDOWN 0x0201u
+#define WM_LBUTTONUP   0x0202u
+typedef struct { uint32_t frame, msg, wp, lp; } qmsg;
+/* scripted input (DS_INPUT), in frame order */
+#define MAX_SCRIPT 256
+static qmsg g_script[MAX_SCRIPT]; static int g_script_n, g_script_next, g_q_loaded;
+/* the queue PeekMessage reads: a ring of posted messages */
+#define QRING 1024
+static qmsg g_ring[QRING]; static uint32_t g_ring_head, g_ring_tail;
+static void post(uint32_t msg, uint32_t wp, uint32_t lp) {
+    if (g_ring_tail - g_ring_head >= QRING) return;          /* full: drop */
+    qmsg *q = &g_ring[g_ring_tail++ % QRING]; q->frame = 0; q->msg = msg; q->wp = wp; q->lp = lp;
+}
+static void q_push(uint32_t frame, uint32_t msg, uint32_t wp, uint32_t lp) {
+    if (g_script_n < MAX_SCRIPT) { qmsg *q = &g_script[g_script_n++]; q->frame = frame; q->msg = msg; q->wp = wp; q->lp = lp; }
+}
+static void q_load(void) {
+    g_q_loaded = 1;
+    const char *e = getenv("DS_INPUT");
+    while (e && *e) {
+        unsigned f, a, b; char what[16]; int used = 0;
+        if (sscanf(e, " %u %15s %n", &f, what, &used) < 2) break;
+        e += used;
+        if (!strcmp(what, "click") && sscanf(e, "%u %u%n", &a, &b, &used) == 2) {
+            uint32_t lp = MAKELONG16(a, b);
+            /* spaced out: the UI picks the hovered widget on its own (sim) tick */
+            q_push(f, WM_MOUSEMOVE, 0, lp); q_push(f + 10, WM_MOUSEMOVE, 0, lp);
+            q_push(f + 20, WM_LBUTTONDOWN, 1, lp); q_push(f + 26, WM_LBUTTONUP, 0, lp);
+            e += used;
+        } else if (!strcmp(what, "hold") && sscanf(e, "%u %u%n", &a, &b, &used) == 2) {   /* F hold VK N */
+            uint32_t sc = 0;
+            for (size_t i = 0; i < sizeof k_vsc / sizeof k_vsc[0]; i++) if (k_vsc[i].vk == a) sc = k_vsc[i].sc;
+            q_push(f, WM_KEYDOWN, a, 1u | (sc << 16));
+            for (uint32_t r = 30; r < b; r += 30) q_push(f + r, WM_KEYDOWN, a, 0x40000001u | (sc << 16));  /* auto-repeat */
+            q_push(f + b, WM_KEYUP, a, 0xC0000001u | (sc << 16));
+            e += used;
+        } else if (!strcmp(what, "key") && sscanf(e, "%u%n", &a, &used) == 1) {
+            uint32_t sc = 0;
+            for (size_t i = 0; i < sizeof k_vsc / sizeof k_vsc[0]; i++) if (k_vsc[i].vk == a) sc = k_vsc[i].sc;
+            q_push(f, WM_KEYDOWN, a, 1u | (sc << 16)); q_push(f + 8, WM_KEYUP, a, 0xC0000001u | (sc << 16));
+            e += used;
+        }
+        while (*e && *e != ';') e++;
+        if (*e == ';') e++;
+    }
+    if (g_script_n) fprintf(stderr, "[user32] DS_INPUT: %d scripted messages\n", g_script_n);
+}
+static void sh_PeekMessageA(void) {          /* (MSG*, hwnd, min, max, wRemoveMsg) */
+    if (!g_q_loaded) q_load();
+    uint32_t m = A32(0), remove = A32(4) & 1;
+    if (ds_sdl_active()) ds_sdl_pump(post);    /* the real screen and buttons */
+    while (g_script_next < g_script_n && ds_frame_count() >= g_script[g_script_next].frame) {
+        qmsg *q = &g_script[g_script_next++];
+        fprintf(stderr, "[user32] input msg 0x%04X (%08X, %08X) at frame %u\n", q->msg, q->wp, q->lp, ds_frame_count());
+        post(q->msg, q->wp, q->lp);
+    }
+    if (g_ring_head != g_ring_tail && g_wnd_n) {
+        qmsg *q = &g_ring[g_ring_head % QRING];
+        if (q->msg >= WM_MOUSEMOVE && q->msg <= 0x020Au) { g_cur_x = (int32_t)(q->lp & 0xFFFF); g_cur_y = (int32_t)(q->lp >> 16); }
+        if (m) {                             /* MSG: hwnd, message, wParam, lParam, time, pt.x, pt.y */
+            MEM32(m) = g_wnd[0].hwnd; MEM32(m + 4) = q->msg; MEM32(m + 8) = q->wp; MEM32(m + 12) = q->lp;
+            MEM32(m + 16) = 0; MEM32(m + 20) = (uint32_t)g_cur_x; MEM32(m + 24) = (uint32_t)g_cur_y;
+        }
+        if (remove) g_ring_head++;
+        RET(1, 5);
+    }
+    RET(0, 5);
+}
 static void sh_TranslateMessage(void){ RET(0, 1); }
 static void sh_DispatchMessageA(void) {              /* (const MSG*): hwnd +0, message +4, wParam +8, lParam +12 */
     uint32_t m = A32(0);

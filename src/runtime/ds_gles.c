@@ -9,7 +9,8 @@
  *    put an SDL2/KMSDRM surface here),
  *  - the game's window surface is a DS_SCREEN_W x DS_SCREEN_H pbuffer,
  *  - EGLDisplay/EGLConfig/EGLSurface/EGLContext are opaque guest tokens.
- * DS_DUMP_FRAMES=N writes every Nth swapped frame to build/frames/*.ppm.
+ * DS_DUMP_FRAMES=N writes every Nth swapped frame to build/frames/*.ppm;
+ * DS_EXIT_AFTER_FRAMES=N exits cleanly after N frames (coverage, CI).
  *
  * Ordinals come from the export tables of the game's own libEGL.dll and
  * libGLESv2.dll. GL_APIENTRY/EGLAPIENTRY are __stdcall: RET pops the args.
@@ -50,6 +51,7 @@ static uint32_t cfg_tok(EGLConfig c) {
 #define TOK_GET(arr, n, base, t) (((t) >= (base) && (t) < (base) + (uint32_t)(n)) ? arr[(t) - (base)] : NULL)
 
 static void sh_eglGetDisplay(void) {             /* (EGLNativeDisplayType: the window's HDC) */
+    if (ds_sdl_active()) RET(TOK_DISPLAY, 1);      /* SDL owns the display, window and context */
     if (g_dpy == EGL_NO_DISPLAY) {
         PFNEGLGETPLATFORMDISPLAYEXTPROC gpd =
             (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
@@ -59,6 +61,7 @@ static void sh_eglGetDisplay(void) {             /* (EGLNativeDisplayType: the w
     RET(g_dpy == EGL_NO_DISPLAY ? 0 : TOK_DISPLAY, 1);
 }
 static void sh_eglInitialize(void) {             /* (dpy, *major, *minor) */
+    if (ds_sdl_active()) { if (A32(1)) MEM32(A32(1)) = 1; if (A32(2)) MEM32(A32(2)) = 4; RET(1, 3); }
     EGLint ma = 0, mi = 0;
     EGLBoolean ok = eglInitialize(g_dpy, &ma, &mi);
     if (A32(1)) MEM32(A32(1)) = 1;               /* report EGL 1.4, as ANGLE did */
@@ -87,6 +90,11 @@ static int attribs_for_config(uint32_t va, EGLint *out, int cap) {
     return n;
 }
 static void sh_eglChooseConfig(void) {           /* (dpy, attribs, configs, size, *num) */
+    if (ds_sdl_active()) {                         /* one config: the SDL window's */
+        if (A32(2) && A32(3)) MEM32(A32(2)) = TOK_CONFIG;
+        if (A32(4)) MEM32(A32(4)) = 1;
+        RET(1, 5);
+    }
     EGLint at[128]; attribs_for_config(A32(1), at, 128);
     uint32_t out = A32(2); EGLint size = (EGLint)A32(3), num = 0;
     EGLConfig cs[MAX_TOK];
@@ -98,6 +106,11 @@ static void sh_eglChooseConfig(void) {           /* (dpy, attribs, configs, size
     RET(ok, 5);
 }
 static void sh_eglGetConfigs(void) {             /* (dpy, configs, size, *num): pbuffer + GLES2 ones only */
+    if (ds_sdl_active()) {
+        if (A32(1) && A32(2)) MEM32(A32(1)) = TOK_CONFIG;
+        if (A32(3)) MEM32(A32(3)) = 1;
+        RET(1, 4);
+    }
     EGLint at[] = { EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE };
     uint32_t out = A32(1); EGLint size = (EGLint)A32(2), num = 0;
     EGLConfig cs[MAX_TOK];
@@ -108,6 +121,7 @@ static void sh_eglGetConfigs(void) {             /* (dpy, configs, size, *num): 
     RET(ok, 4);
 }
 static void sh_eglCreateWindowSurface(void) {    /* (dpy, config, HWND, attribs) -> a pbuffer */
+    if (ds_sdl_active()) RET(ds_sdl_open(DS_SCREEN_W, DS_SCREEN_H) == 0 ? TOK_SURFACE : 0, 4);
     EGLConfig c = TOK_GET(g_cfg, g_cfg_n, TOK_CONFIG, A32(1));
     EGLint pa[] = { EGL_WIDTH, DS_SCREEN_W, EGL_HEIGHT, DS_SCREEN_H, EGL_NONE };
     EGLSurface s = c ? eglCreatePbufferSurface(g_dpy, c, pa) : EGL_NO_SURFACE;
@@ -118,6 +132,7 @@ static void sh_eglCreateWindowSurface(void) {    /* (dpy, config, HWND, attribs)
     RET(TOK_SURFACE + (uint32_t)g_surf_n++, 4);
 }
 static void sh_eglCreateContext(void) {          /* (dpy, config, share, attribs) */
+    if (ds_sdl_active()) RET(TOK_CONTEXT, 4);     /* SDL created it with the window */
     EGLConfig c = TOK_GET(g_cfg, g_cfg_n, TOK_CONFIG, A32(1));
     EGLContext share = A32(2) ? TOK_GET(g_ctx, g_ctx_n, TOK_CONTEXT, A32(2)) : EGL_NO_CONTEXT;
     EGLint at[32]; int n = 0;
@@ -133,6 +148,7 @@ static void sh_eglCreateContext(void) {          /* (dpy, config, share, attribs
     RET(TOK_CONTEXT + (uint32_t)g_ctx_n++, 4);
 }
 static void sh_eglMakeCurrent(void) {            /* (dpy, draw, read, ctx) */
+    if (ds_sdl_active()) RET(ds_sdl_make_current(A32(3) != 0), 4);
     EGLSurface d = A32(1) ? TOK_GET(g_surf, g_surf_n, TOK_SURFACE, A32(1)) : EGL_NO_SURFACE;
     EGLSurface r = A32(2) ? TOK_GET(g_surf, g_surf_n, TOK_SURFACE, A32(2)) : EGL_NO_SURFACE;
     EGLContext x = A32(3) ? TOK_GET(g_ctx, g_ctx_n, TOK_CONTEXT, A32(3)) : EGL_NO_CONTEXT;
@@ -145,8 +161,10 @@ static void sh_eglMakeCurrent(void) {            /* (dpy, draw, read, ctx) */
 }
 
 static uint32_t g_frame;
+uint32_t ds_frame_count(void) { return g_frame; }
 static void dump_frame(uint32_t n) {
-    static uint8_t px[DS_SCREEN_W * DS_SCREEN_H * 4];
+    static uint8_t *px;
+    if (!px) px = (uint8_t *)malloc((size_t)DS_SCREEN_W * DS_SCREEN_H * 4);
     glReadPixels(0, 0, DS_SCREEN_W, DS_SCREEN_H, GL_RGBA, GL_UNSIGNED_BYTE, px);
     mkdir("build/frames", 0755);
     char path[64]; snprintf(path, sizeof path, "build/frames/frame_%05u.ppm", n);
@@ -164,7 +182,19 @@ static void sh_eglSwapBuffers(void) {            /* (dpy, surface) */
     EGLSurface s = TOK_GET(g_surf, g_surf_n, TOK_SURFACE, A32(1));
     g_frame++;
     if (every > 0 && g_frame % (uint32_t)every == 0) dump_frame(g_frame);
-    EGLBoolean ok = s ? eglSwapBuffers(g_dpy, s) : EGL_FALSE;
+    EGLBoolean ok;
+    if (ds_sdl_active()) { ds_sdl_swap(); ok = EGL_TRUE; }
+    else ok = s ? eglSwapBuffers(g_dpy, s) : EGL_FALSE;
+    ds_yield();                                  /* a frame is a natural preemption point */
+    static int exit_after = -1;
+    if (exit_after < 0) { const char *e = getenv("DS_EXIT_AFTER_FRAMES"); exit_after = e ? atoi(e) : 0; }
+    if (exit_after > 0 && g_frame >= (uint32_t)exit_after) {
+        fprintf(stderr, "[egl] DS_EXIT_AFTER_FRAMES=%d reached: exiting\n", exit_after);
+        exit(0);                                 /* atexit writes the coverage */
+    }
+    static int stats = -1;
+    if (stats < 0) { const char *e = getenv("DS_HEAP_STATS"); stats = e ? atoi(e) : 0; }
+    if (stats > 0 && g_frame % (uint32_t)stats == 0) ds_heap_stats();
     if (g_frame == 1 || g_frame % 120 == 0) {
         struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
         double sec = (double)(t.tv_sec - t0.tv_sec) + (double)(t.tv_nsec - t0.tv_nsec) / 1e9;
@@ -202,7 +232,106 @@ static void sh_glClearColor(void)           { glClearColor(AF(0), AF(1), AF(2), 
 static void sh_glClearStencil(void)         { glClearStencil(I(0)); RETV(1); }
 static void sh_glColorMask(void)            { glColorMask((GLboolean)A32(0), (GLboolean)A32(1), (GLboolean)A32(2), (GLboolean)A32(3)); RETV(4); }
 static void sh_glCompileShader(void)        { glCompileShader(U(0)); RETV(1); }
+/* ---- DXT (S3TC) without the GPU's help
+ * Don't Starve's textures are DXT5 (a few DXT1). ANGLE took them as is; a GLES2
+ * driver without S3TC (the R36S's Mali-G31) cannot, so they are decoded here
+ * and uploaded uncompressed: RGBA4444 by default (half the memory of RGBA8),
+ * DS_SOFT_DXT=rgba8 for full precision, DS_SOFT_DXT=1 to force the path. */
+#define FMT_DXT1_RGB  0x83F0
+#define FMT_DXT1_RGBA 0x83F1
+#define FMT_DXT3      0x83F2
+#define FMT_DXT5      0x83F3
+static int g_soft_dxt = -1, g_dxt_rgba8, g_tex_half;
+static int soft_dxt(void) {
+    if (g_soft_dxt < 0) {
+        const char *v = getenv("DS_SOFT_DXT"), *x = (const char *)glGetString(GL_EXTENSIONS);
+        g_dxt_rgba8 = v && !strcmp(v, "rgba8");
+        /* DS_TEX_HALF=1 (default on aarch64): textures one mip level smaller --
+         * level 0 is box-filtered to half size, then the game's own level k is
+         * stored as level k - 1. A 640x480 screen hardly ever samples the
+         * full-size level, and it is three quarters of the memory. */
+        const char *hv = getenv("DS_TEX_HALF");
+#if defined(__aarch64__)
+        g_tex_half = !hv || atoi(hv) != 0;
+#else
+        g_tex_half = hv && atoi(hv) != 0;
+#endif
+        g_soft_dxt = (v && *v && strcmp(v, "0")) || !x || !strstr(x, "texture_compression_s3tc");
+        if (g_soft_dxt) fprintf(stderr, "[egl] no S3TC on this GPU: DXT textures decoded on the CPU (%s%s)\n",
+                                g_dxt_rgba8 ? "RGBA8" : "RGBA4444", g_tex_half ? ", half size" : "");
+    }
+    return g_soft_dxt;
+}
+static void rgb565(uint16_t c, uint8_t *o) {
+    o[0] = (uint8_t)(((c >> 11) & 31) * 255 / 31); o[1] = (uint8_t)(((c >> 5) & 63) * 255 / 63); o[2] = (uint8_t)((c & 31) * 255 / 31);
+}
+/* one 4x4 block -> 16 RGBA8 pixels */
+static void dxt_block(GLenum f, const uint8_t *b, uint8_t px[16][4]) {
+    const uint8_t *cb = f == FMT_DXT3 || f == FMT_DXT5 ? b + 8 : b;
+    uint16_t c0 = (uint16_t)(cb[0] | cb[1] << 8), c1 = (uint16_t)(cb[2] | cb[3] << 8);
+    uint8_t pal[4][4]; rgb565(c0, pal[0]); rgb565(c1, pal[1]);
+    pal[0][3] = pal[1][3] = pal[2][3] = 255; pal[3][3] = 255;
+    if (c0 > c1 || f == FMT_DXT3 || f == FMT_DXT5)
+        for (int k = 0; k < 3; k++) { pal[2][k] = (uint8_t)((2 * pal[0][k] + pal[1][k]) / 3); pal[3][k] = (uint8_t)((pal[0][k] + 2 * pal[1][k]) / 3); }
+    else {
+        for (int k = 0; k < 3; k++) { pal[2][k] = (uint8_t)((pal[0][k] + pal[1][k]) / 2); pal[3][k] = 0; }
+        if (f == FMT_DXT1_RGBA) pal[3][3] = 0;
+    }
+    uint32_t idx = (uint32_t)cb[4] | (uint32_t)cb[5] << 8 | (uint32_t)cb[6] << 16 | (uint32_t)cb[7] << 24;
+    for (int i = 0; i < 16; i++) memcpy(px[i], pal[(idx >> (2 * i)) & 3], 4);
+    if (f == FMT_DXT3)
+        for (int i = 0; i < 16; i++) px[i][3] = (uint8_t)(((b[i / 2] >> (4 * (i & 1))) & 15) * 17);
+    else if (f == FMT_DXT5) {
+        uint8_t a[8]; a[0] = b[0]; a[1] = b[1];
+        if (a[0] > a[1]) for (int k = 1; k < 7; k++) a[k + 1] = (uint8_t)(((7 - k) * a[0] + k * a[1]) / 7);
+        else { for (int k = 1; k < 5; k++) a[k + 1] = (uint8_t)(((5 - k) * a[0] + k * a[1]) / 5); a[6] = 0; a[7] = 255; }
+        uint64_t bits = 0; for (int k = 0; k < 6; k++) bits |= (uint64_t)b[2 + k] << (8 * k);
+        for (int i = 0; i < 16; i++) px[i][3] = a[(bits >> (3 * i)) & 7];
+    }
+}
+static int dxt_upload(GLenum target, GLint level, GLenum f, GLsizei w, GLsizei h, const uint8_t *d) {
+    if (f != FMT_DXT1_RGB && f != FMT_DXT1_RGBA && f != FMT_DXT3 && f != FMT_DXT5) return 0;
+    size_t bs = f == FMT_DXT3 || f == FMT_DXT5 ? 16 : 8;
+    int bw = (w + 3) / 4, bh = (h + 3) / 4;
+    uint8_t *rgba = (uint8_t *)malloc((size_t)w * (size_t)h * 4 + 16);
+    if (!rgba) return 0;
+    for (int by = 0; by < bh; by++)
+        for (int bx = 0; bx < bw; bx++) {
+            uint8_t px[16][4];
+            if (d) dxt_block(f, d + ((size_t)by * (size_t)bw + (size_t)bx) * bs, px); else memset(px, 0, sizeof px);
+            for (int i = 0; i < 16; i++) {
+                int x = bx * 4 + (i & 3), y = by * 4 + (i >> 2);
+                if (x < w && y < h) memcpy(rgba + 4 * ((size_t)y * (size_t)w + (size_t)x), px[i], 4);
+            }
+        }
+    if (g_tex_half && level > 0) level--;                       /* the game's level k is our k - 1 */
+    else if (g_tex_half && w > 1 && h > 1) {                    /* level 0: box-filter to half size */
+        int hw = w / 2, hh = h / 2;
+        for (int y = 0; y < hh; y++)
+            for (int x = 0; x < hw; x++)
+                for (int c = 0; c < 4; c++) {
+                    const uint8_t *p = rgba + 4 * ((size_t)(2 * y) * (size_t)w + (size_t)(2 * x)) + c;
+                    rgba[4 * ((size_t)y * (size_t)hw + (size_t)x) + c] = (uint8_t)((p[0] + p[4] + p[4 * w] + p[4 * w + 4] + 2) / 4);
+                }
+        w = hw; h = hh;
+    }
+    if (!g_dxt_rgba8) {                                         /* RGBA4444, in place */
+        uint16_t *o = (uint16_t *)rgba;
+        for (size_t i = 0; i < (size_t)w * (size_t)h; i++) {
+            const uint8_t *p = rgba + 4 * i;
+            o[i] = (uint16_t)((p[0] >> 4) << 12 | (p[1] >> 4) << 8 | (p[2] >> 4) << 4 | (p[3] >> 4));
+        }
+    }
+    GLint align; glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, g_dxt_rgba8 ? 4 : 2);
+    glTexImage2D(target, level, GL_RGBA, w, h, 0, GL_RGBA, g_dxt_rgba8 ? GL_UNSIGNED_BYTE : GL_UNSIGNED_SHORT_4_4_4_4, rgba);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, align);
+    free(rgba);
+    return 1;
+}
+
 static void sh_glCompressedTexImage2D(void) { /* (target, level, ifmt, w, h, border, imageSize, data) */
+    if (soft_dxt() && dxt_upload(E(0), I(1), E(2), I(3), I(4), (const uint8_t *)P(7))) RETV(8);
     glCompressedTexImage2D(E(0), I(1), E(2), I(3), I(4), I(5), I(6), P(7)); RETV(8);
 }
 static void sh_glCreateProgram(void)        { RET(glCreateProgram(), 0); }
@@ -245,8 +374,12 @@ static void sh_glGetString(void) {          /* host string -> a guest copy, cach
     for (int i = 0; i < n; i++) if (cache[i].e == e) RET(cache[i].va, 1);
     const char *s = (const char *)glGetString(e);
     if (!s) RET(0, 1);
-    uint32_t len = (uint32_t)strlen(s) + 1, va = ds_arena_alloc(len, 4);
+    static const char dxt[] = " GL_EXT_texture_compression_dxt1 GL_ANGLE_texture_compression_dxt3"
+                              " GL_ANGLE_texture_compression_dxt5 GL_EXT_texture_compression_s3tc";
+    int add = e == GL_EXTENSIONS && soft_dxt();                 /* decoded here, so still on offer */
+    uint32_t len = (uint32_t)strlen(s) + 1, va = ds_arena_alloc(len + (add ? (uint32_t)sizeof dxt : 0), 4);
     memcpy(ds_hostptr(va), s, len);
+    if (add) memcpy((char *)ds_hostptr(va) + len - 1, dxt, sizeof dxt);
     if (n < 16) { cache[n].e = e; cache[n].va = va; n++; }
     RET(va, 1);
 }
@@ -256,16 +389,48 @@ static void sh_glPixelStorei(void)          { glPixelStorei(E(0), I(1)); RETV(2)
 static void sh_glPolygonOffset(void)        { glPolygonOffset(AF(0), AF(1)); RETV(2); }
 static void sh_glRenderbufferStorage(void)  { glRenderbufferStorage(E(0), E(1), I(2), I(3)); RETV(4); }
 static void sh_glScissor(void)              { glScissor(I(0), I(1), I(2), I(3)); RETV(4); }
+/* ANGLE accepts `#extension` anywhere; GLSL ES (Mesa, and the Mali driver)
+ * wants every one before any other code. The game's shaders are assembled
+ * from includes, so their #extension lines land mid-file: hoist them to the
+ * top (after #version), leaving a blank line in place. */
+static char *hoist_extensions(const char *src) {
+    size_t n = strlen(src);
+    char *ext = (char *)malloc(n + 1), *body = (char *)malloc(n + 1), *ver = (char *)malloc(n + 1);
+    size_t ne = 0, nb = 0, nv = 0;
+    for (const char *p = src; *p; ) {
+        const char *e = strchr(p, '\n'); size_t len = e ? (size_t)(e - p + 1) : strlen(p);
+        const char *q = p; while (q < p + len && (*q == ' ' || *q == '\t')) q++;
+        if (!strncmp(q, "#extension", 10)) { memcpy(ext + ne, p, len); ne += len; if (!e) ext[ne++] = '\n'; body[nb++] = '\n'; }
+        else if (!strncmp(q, "#version", 8) && nb == 0 && nv == 0) { memcpy(ver + nv, p, len); nv += len; }
+        else { memcpy(body + nb, p, len); nb += len; }
+        p += len;
+    }
+    char *out = (char *)malloc(nv + ne + nb + 1);
+    memcpy(out, ver, nv); memcpy(out + nv, ext, ne); memcpy(out + nv + ne, body, nb); out[nv + ne + nb] = 0;
+    free(ext); free(body); free(ver);
+    return out;
+}
 static void sh_glShaderSource(void) {       /* (shader, count, const char *const *strings, const GLint *lengths) */
     GLsizei n = I(1);
-    const GLchar *str[64]; GLint len[64];
-    if (n > 64) n = 64;
+    size_t total = 0;
     for (GLsizei i = 0; i < n; i++) {
         uint32_t sva = MEM32(A32(2) + 4u * (uint32_t)i);
-        str[i] = (const GLchar *)(sva ? ds_hostptr(sva) : "");
-        len[i] = A32(3) ? (GLint)MEM32(A32(3) + 4u * (uint32_t)i) : -1;
+        GLint len = A32(3) ? (GLint)MEM32(A32(3) + 4u * (uint32_t)i) : -1;
+        total += sva ? (len < 0 ? strlen((const char *)ds_hostptr(sva)) : (size_t)len) : 0;
     }
-    glShaderSource(U(0), n, str, len);
+    char *joined = (char *)malloc(total + 1); size_t at = 0;
+    for (GLsizei i = 0; i < n; i++) {
+        uint32_t sva = MEM32(A32(2) + 4u * (uint32_t)i);
+        GLint len = A32(3) ? (GLint)MEM32(A32(3) + 4u * (uint32_t)i) : -1;
+        if (!sva) continue;
+        size_t l = len < 0 ? strlen((const char *)ds_hostptr(sva)) : (size_t)len;
+        memcpy(joined + at, ds_hostptr(sva), l); at += l;
+    }
+    joined[at] = 0;
+    char *src = hoist_extensions(joined);
+    const GLchar *one = src;
+    glShaderSource(U(0), 1, &one, NULL);
+    free(src); free(joined);
     RETV(4);
 }
 static void sh_glStencilFunc(void)          { glStencilFunc(E(0), I(1), U(2)); RETV(3); }
@@ -292,7 +457,11 @@ static void sh_glVertexAttribPointer(void) {/* (index, size, type, normalized, s
     glVertexAttribPointer(U(0), I(1), E(2), (GLboolean)A32(3), I(4), ptr);
     RETV(6);
 }
-static void sh_glViewport(void)             { glViewport(I(0), I(1), I(2), I(3)); RETV(4); }
+static void sh_glViewport(void) {
+    static int logged;
+    if (logged < 4 && (I(2) != DS_SCREEN_W || I(3) != DS_SCREEN_H)) { logged++; fprintf(stderr, "[gl] glViewport(%d, %d, %d, %d)\n", I(0), I(1), I(2), I(3)); }
+    glViewport(I(0), I(1), I(2), I(3)); RETV(4);
+}
 
 /* name + "dll#ordinal" (ordinals from the game's own ANGLE DLLs' export tables) */
 #define EGL(ord, name)  { #name, sh_##name }, { "libEGL.dll#" #ord, sh_##name }

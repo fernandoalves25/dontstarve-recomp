@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <time.h>
 #include "ds_hle.h"
 #include "pe_format.h"
 
@@ -39,6 +40,7 @@ uint32_t  g_icall_trace[ICALL_TRACE_SIZE], g_icall_from[ICALL_TRACE_SIZE];
 uint32_t  g_icall_trace_idx, g_icall_count;
 
 int ds_trace;
+int g_ds_screen_w = 640, g_ds_screen_h = 480;
 
 /* ============================================================ runtime coverage
  * Built with -DRECOMP_TRACE (COVERAGE=1), every lifted function calls
@@ -104,6 +106,17 @@ void recomp_trace_enter(uint32_t va) {
     if (g_cov_n < COV_CAP / 2) { g_cov[h] = va; g_cov_n++; }
 }
 static void cov_dump(void) {
+    const char *m = getenv("DS_COV_MERGE");                /* union with earlier runs; =0: this run only */
+    FILE *in = !(m && *m == '0') ? fopen("build/executed_vas.txt", "r") : NULL;
+    if (in) {
+        unsigned va;
+        while (fscanf(in, "%x", &va) == 1 && va && g_cov_n < COV_CAP / 2) {
+            uint32_t h = (va * 2654435761u) & (COV_CAP - 1);
+            while (g_cov[h] && g_cov[h] != va) h = (h + 1) & (COV_CAP - 1);
+            if (!g_cov[h]) { g_cov[h] = va; g_cov_n++; }
+        }
+        fclose(in);
+    }
     int fd = open("build/executed_vas.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return;
     char b[16];
@@ -151,6 +164,7 @@ uint32_t ds_arena_alloc(uint32_t size, uint32_t align) {
     return va;
 }
 void ds_arena_reset_to(uint32_t va) { g_brk = va; }
+uint32_t ds_arena_brk(void) { return g_brk; }
 
 /* ============================================================ handle table
  * HANDLEs/HMODULEs/etc are opaque tokens, not host pointers (never truncated). */
@@ -159,11 +173,30 @@ typedef struct { int kind; void *obj; } handle_slot;
 static handle_slot g_handles[MAX_HANDLES];
 static int g_handle_n = 1;   /* token 0 is reserved (NULL/invalid) */
 
+/* Freed slots are reused (CloseHandle/FindClose): the game opens thousands of
+ * files and sync objects while it loads. */
+static uint32_t g_handle_free[MAX_HANDLES];
+static int g_handle_free_n;
 uint32_t ds_handle_new(int kind, void *obj) {
-    if (g_handle_n >= MAX_HANDLES) ds_fatal("handle table full");
-    g_handles[g_handle_n].kind = kind;
-    g_handles[g_handle_n].obj = obj;
-    return (uint32_t)g_handle_n++;
+    uint32_t t;
+    if (g_handle_free_n > 0) t = g_handle_free[--g_handle_free_n];
+    else {
+        if (g_handle_n >= MAX_HANDLES) {
+            int cnt[64] = {0};
+            for (int i = 1; i < g_handle_n; i++) cnt[g_handles[i].kind & 63]++;
+            for (int k = 0; k < 64; k++) if (cnt[k]) fprintf(stderr, "[ds] handles of kind 0x%02X: %d\n", k, cnt[k]);
+            ds_fatal("handle table full");
+        }
+        t = (uint32_t)g_handle_n++;
+    }
+    g_handles[t].kind = kind;
+    g_handles[t].obj = obj;
+    return t;
+}
+void ds_handle_free(uint32_t t) {
+    if (t == 0 || t >= (uint32_t)g_handle_n || g_handles[t].kind == 0) return;
+    g_handles[t].kind = 0; g_handles[t].obj = NULL;
+    g_handle_free[g_handle_free_n++] = t;
 }
 void *ds_handle_get(uint32_t t, int kind) {
     if (t == 0 || t >= (uint32_t)g_handle_n) return NULL;
@@ -181,6 +214,7 @@ typedef struct {
     uint32_t eax, ecx, edx, esp, ebx, esi, edi, ebp, fs, cur;
     double st[8]; int fp_top; uint16_t fpu_cw;
     uint64_t mm[8];
+    V128 xmm[8]; uint32_t mxcsr;   /* live across a preemption point (a loop back-edge), unlike a call */
 } regs_t;
 
 static void regs_save(regs_t *r) {
@@ -189,6 +223,7 @@ static void regs_save(regs_t *r) {
     r->fs=g_fs_base; r->cur=g_cur_func;
     memcpy(r->st, g_st, sizeof g_st); r->fp_top=g_fp_top; r->fpu_cw=g_fpu_cw;
     memcpy(r->mm, g_mm, sizeof g_mm);
+    memcpy(r->xmm, g_xmm, sizeof g_xmm); r->mxcsr = g_mxcsr;
 }
 static void regs_load(const regs_t *r) {
     g_eax=r->eax; g_ecx=r->ecx; g_edx=r->edx; g_esp=r->esp;
@@ -196,6 +231,7 @@ static void regs_load(const regs_t *r) {
     g_fs_base=r->fs; g_cur_func=r->cur;
     memcpy(g_st, r->st, sizeof g_st); g_fp_top=r->fp_top; g_fpu_cw=r->fpu_cw;
     memcpy(g_mm, r->mm, sizeof g_mm);
+    memcpy(g_xmm, r->xmm, sizeof g_xmm); g_mxcsr = r->mxcsr;
 }
 
 #define GUEST_STACK (4u << 20)
@@ -213,13 +249,26 @@ static uint32_t make_tib(uint32_t stack_lo, uint32_t stack_hi) {
 typedef struct { regs_t r; int depth, inited; } mstate;
 static __thread mstate g_ms;
 
+/* Fair hand-over: how many threads wait for the machine, and how many times it
+ * changed hands (a yielding thread retakes it only after someone else had it). */
+static volatile int g_mach_waiters;
+static volatile uint32_t g_mach_gen;
+static void mach_lock(void) {
+    if (pthread_mutex_trylock(&g_mach) != 0) {
+        __atomic_add_fetch(&g_mach_waiters, 1, __ATOMIC_SEQ_CST);
+        pthread_mutex_lock(&g_mach);
+        __atomic_sub_fetch(&g_mach_waiters, 1, __ATOMIC_SEQ_CST);
+    }
+    __atomic_add_fetch(&g_mach_gen, 1, __ATOMIC_SEQ_CST);
+}
 void mach_enter(void) {
-    pthread_mutex_lock(&g_mach);
+    if (g_ms.depth == 0) mach_lock(); else pthread_mutex_lock(&g_mach);
     if (!g_ms.inited) {
         uint32_t lo = ds_arena_alloc(GUEST_STACK, 0x1000);
         g_ms.r.esp    = lo + GUEST_STACK - 64;
         g_ms.r.fs     = make_tib(lo, lo + GUEST_STACK);
         g_ms.r.fpu_cw = 0x027F;
+        g_ms.r.mxcsr  = 0x1F80;
         g_ms.inited   = 1;
     }
     if (g_ms.depth++ == 0) regs_load(&g_ms.r);
@@ -241,9 +290,24 @@ int ds_block_begin(void) {
     return d;
 }
 void ds_block_end(int d) {
-    for (int i = 0; i < d; i++) pthread_mutex_lock(&g_mach);
+    if (d > 0) { mach_lock(); for (int i = 1; i < d; i++) pthread_mutex_lock(&g_mach); }
     g_ms.depth = d;
     regs_load(&g_ms.r);
+}
+
+/* A preemption point (RECOMP_BACKEDGE every RECOMP_YIELD_EVERY loop back-edges,
+ * and every swapped frame): if another guest thread waits for the machine,
+ * hand it over and take it back once it has been taken. Without this the
+ * render loop never blocks, and the WorldSim thread that generates a new
+ * world never ran at all. */
+void ds_yield(void) {
+    if (__atomic_load_n(&g_mach_waiters, __ATOMIC_SEQ_CST) == 0) return;
+    uint32_t gen = __atomic_load_n(&g_mach_gen, __ATOMIC_SEQ_CST);
+    int d = ds_block_begin();
+    for (int i = 0; i < 2000 && __atomic_load_n(&g_mach_gen, __ATOMIC_SEQ_CST) == gen; i++) {
+        struct timespec t = { 0, 50000 }; nanosleep(&t, NULL);   /* until someone took it (<= 100 ms) */
+    }
+    ds_block_end(d);
 }
 
 /* ============================================================ setjmp/longjmp
@@ -629,6 +693,7 @@ int main(int argc, char **argv) {
     }
     if (!exe) exe = "work/dontstarve.exe";
     if (getenv("DS_HLE_TRACE")) ds_trace = 1;
+    if (getenv("DS_SCREEN")) sscanf(getenv("DS_SCREEN"), "%dx%d", &g_ds_screen_w, &g_ds_screen_h);
     g_permissive = permissive;
 
     fprintf(stderr, "=== Don't Starve recompiled - arena host (64-bit) ===\n");
@@ -639,8 +704,12 @@ int main(int argc, char **argv) {
     /* Map the exe and the lifted CRT DLLs into the arena at their ImageBases. */
     ds_image img_exe, img_r, img_p;
     if (ds_pe_load(exe, &img_exe) != 0) return 1;
-    int have_r = (ds_pe_load("work/msvcr90.dll", &img_r) == 0); if (have_r) g_msvcr_img = &img_r;
-    int have_p = (ds_pe_load("work/msvcp90.dll", &img_p) == 0); if (have_p) g_msvcp_img = &img_p;
+    /* the VC9 CRT DLLs (the images the lifted code was built from): DS_CRT_DIR, default work/ */
+    const char *crt = getenv("DS_CRT_DIR"); if (!crt || !*crt) crt = "work";
+    char pr[512], pp[512];
+    snprintf(pr, sizeof pr, "%s/msvcr90.dll", crt); snprintf(pp, sizeof pp, "%s/msvcp90.dll", crt);
+    int have_r = (ds_pe_load(pr, &img_r) == 0); if (have_r) g_msvcr_img = &img_r;
+    int have_p = (ds_pe_load(pp, &img_p) == 0); if (have_p) g_msvcp_img = &img_p;
 
     ds_host_init();
     ds_register_manual(0x7857DF6Cu, ds_eh_prolog);     /* msvcr90 __EH_prolog */
@@ -648,6 +717,7 @@ int main(int argc, char **argv) {
     ds_register_manual(0x7855AE20u, ds_memmove);       /* msvcr90 memcpy */
     ds_register_manual(0x7855B310u, ds_memmove);       /* msvcr90 memmove */
     ds_register_manual(0x785947D8u, ds_longjmp);       /* msvcr90 longjmp */
+    recomp_yield_hook = ds_yield;                      /* RECOMP_BACKEDGE preemption point */
     fprintf(stderr, "[ds] registered %d HLE shims; lifted DLLs: msvcr90=%d msvcp90=%d\n",
             g_shim_n, have_r, have_p);
 

@@ -6,6 +6,7 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/mman.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -78,13 +79,101 @@ static void sh_ExitProcess(void) { fprintf(stderr, "[ds] guest ExitProcess(%u)\n
 static void sh_GetProcessHeap(void) { RET(ds_handle_new(HK_HEAP, 0), 0); }
 static void sh_HeapCreate(void)     { RET(ds_handle_new(HK_HEAP, 0), 3); }
 static void sh_HeapDestroy(void)    { RET(1, 1); }
-/* Bump allocator with an 8-byte header holding the block size, so HeapSize
- * (the CRT's _msize, e.g. when it grows the onexit table) and HeapReAlloc's
- * copy see the real size. Blocks stay 8-aligned. */
+/* The guest heap: blocks carved from the arena, recycled through free lists.
+ * Header (8 bytes, keeps 8-byte alignment): +0 the size asked for (HeapSize,
+ * the CRT's _msize), +4 the block's size class. Classes: small blocks in
+ * 16-byte steps up to 4 KB, medium in 4 KB pages up to 1 MB, large in 64 KB
+ * steps (best fit from one list). A freed block goes back to its class and
+ * is reused as is -- no coalescing, which load/unload cycles tolerate.
+ * (A bump allocator with a no-op HeapFree ran out of arena while the game
+ * loaded its first world.) Shims run under the machine lock: no locking. */
+#define H_SMALL_MAX   4096u
+#define H_MEDIUM_MAX  (1u << 20)
+/* classes: 1..256 small, 257..512 medium (1..256 pages), 513 large. The
+ * header word +4 is TAG | class: a live block is H_LIVE, a freed one H_FREE,
+ * so a HeapFree of anything else, or a second free, is ignored. */
+#define H_NCLASS      (256 + 256 + 2)
+#define H_LARGE       (H_NCLASS - 1)
+#define H_LIVE        0xA5000000u
+#define H_FREE        0x5A000000u
+#define H_TAGMASK     0xFF000000u
+static uint32_t g_hfree[H_NCLASS];                  /* free list heads (block VAs; link in payload +0) */
+static uint64_t g_heap_live;                        /* bytes handed out and not freed (diagnostics) */
+static uint64_t g_hfree_bytes;                      /* bytes on the free lists (diagnostics) */
+static uint32_t h_class(uint32_t size, uint32_t *cap) {
+    if (size <= H_SMALL_MAX) { uint32_t r = (size + 15u) & ~15u; if (!r) r = 16; *cap = r; return r / 16u; }
+    if (size <= H_MEDIUM_MAX) { uint32_t r = (size + 4095u) & ~4095u; *cap = r; return 256u + r / 4096u; }
+    *cap = (size + 0xFFFFu) & ~0xFFFFu; return H_LARGE;
+}
+static uint32_t h_cap_of(uint32_t c) { return c < 256 + 1 ? c * 16u : (c - 256u) * 4096u; }   /* not H_LARGE */
+static uint32_t h_cap(uint32_t va) {                /* capacity of a live block, from its class */
+    uint32_t c = MEM32(va - 4) & ~H_TAGMASK;
+    if (c < H_LARGE) return h_cap_of(c);
+    return MEM32(va - 12);                          /* large: capacity kept in a second header word */
+}
 static uint32_t heap_alloc(uint32_t size) {
-    uint32_t va = ds_arena_alloc((size ? size : 1) + 8u, 8) + 8u;
-    MEM32(va - 8) = size;
+    uint32_t cap, c = h_class(size, &cap), va = 0;
+    if (c != H_LARGE) {
+        /* this class's free list, else a slightly bigger class's (small: up to
+         * +25%, medium: up to twice the pages) before growing the arena; the
+         * block keeps its own class, and its unused tail pages were given back
+         * when it was freed */
+        uint32_t top = c <= 256 ? c + c / 4 : c + (c - 256);
+        if (c <= 256 && top > 256) top = 256;
+        if (top > H_LARGE - 1) top = H_LARGE - 1;
+        for (uint32_t k = c; k <= top && !va; k++)
+            if ((va = g_hfree[k])) { g_hfree[k] = MEM32(va); c = k; cap = h_cap_of(k); g_hfree_bytes -= cap; }
+        if (!va) va = ds_arena_alloc(cap + 8u, 8) + 8u;
+    } else {                                        /* best fit among the free large blocks */
+        uint32_t *link = &g_hfree[H_LARGE], *best = NULL;
+        for (uint32_t b = *link; b; link = (uint32_t *)ds_hostptr(b), b = *link) {
+            uint32_t bc = MEM32(b - 12);
+            if (bc >= cap && (!best || bc < MEM32(*best - 12))) best = link;
+        }
+        if (best) { va = *best; *best = MEM32(va); cap = MEM32(va - 12); g_hfree_bytes -= cap; }
+        else { va = ds_arena_alloc(cap + 16u, 16) + 16u; MEM32(va - 12) = cap; }
+    }
+    MEM32(va - 8) = size; MEM32(va - 4) = H_LIVE | c;
+    g_heap_live += cap;
     return va;
+}
+/* Freed blocks wait in a FIFO quarantine (up to H_QUAR_BYTES / H_QUAR_N)
+ * before their class reuses them: the game reads some objects shortly after
+ * freeing them, which the Windows heap tolerates because it does not hand a
+ * block straight back out. With immediate LIFO reuse, starting a new game
+ * crashed on a stale vector (DS_HEAP_NOREUSE=1 confirmed it). */
+#define H_QUAR_N     65536u
+#define H_QUAR_BYTES (32u << 20)
+static uint32_t g_quar[H_QUAR_N], g_quar_head, g_quar_tail;
+static uint64_t g_quar_bytes;
+/* Give a free block's whole pages back to the OS (they read as zeros when the
+ * block is next used): without it the resident size only ever grows. The page
+ * holding the header and the free-list link (va - 16 .. va + 4) stays. */
+static void h_drop_pages(uint32_t va, uint32_t cap) {
+    if (cap < (64u << 10)) return;
+    uint32_t lo = (va + 4u + 4095u) & ~4095u, hi = (va + cap) & ~4095u;
+    if (hi > lo) madvise(ds_hostptr(lo), hi - lo, MADV_DONTNEED);
+}
+static void h_release(uint32_t va) {                /* quarantine -> its class's free list */
+    uint32_t c = MEM32(va - 4) & ~H_TAGMASK, cap = h_cap(va);
+    g_quar_bytes -= cap; g_hfree_bytes += cap;
+    h_drop_pages(va, cap);
+    MEM32(va) = g_hfree[c]; g_hfree[c] = va;        /* large blocks keep their capacity at va - 12 */
+}
+static void heap_free(uint32_t va) {
+    if (!va) return;
+    static int noreuse = -1;
+    if (noreuse < 0) { const char *e = getenv("DS_HEAP_NOREUSE"); noreuse = e && *e == '1'; }
+    uint32_t w = MEM32(va - 4), c = w & ~H_TAGMASK;
+    if ((w & H_TAGMASK) != H_LIVE || c == 0 || c >= H_NCLASS) return;   /* not a live block of ours */
+    uint32_t cap = h_cap(va);
+    g_heap_live -= cap;
+    MEM32(va - 8) = 0;
+    MEM32(va - 4) = H_FREE | c;
+    if (noreuse) return;                            /* debug: never recycle (use-after-free hunt) */
+    g_quar[g_quar_tail++ % H_QUAR_N] = va; g_quar_bytes += cap;
+    while (g_quar_tail - g_quar_head > H_QUAR_N - 1 || g_quar_bytes > H_QUAR_BYTES)
+        h_release(g_quar[g_quar_head++ % H_QUAR_N]);
 }
 static void sh_HeapAlloc(void) {
     /* (hHeap, dwFlags, dwBytes) */
@@ -93,27 +182,64 @@ static void sh_HeapAlloc(void) {
     if (flags & 0x8) memset(ds_hostptr(va), 0, size);  /* HEAP_ZERO_MEMORY */
     RET(va, 3);
 }
-static void sh_HeapFree(void)   { RET(1, 3); }
-static void sh_HeapSize(void)   { uint32_t p = A32(2); RET(p ? MEM32(p - 8) : 0xFFFFFFFFu, 3); }
+static void sh_HeapFree(void)   { heap_free(A32(2)); RET(1, 3); }
+static void sh_HeapSize(void)   { uint32_t p = A32(2); RET(p && (MEM32(p - 4) & H_TAGMASK) == H_LIVE ? MEM32(p - 8) : 0xFFFFFFFFu, 3); }
 static void sh_HeapReAlloc(void) {
-    /* (hHeap, flags, mem, size): new block + copy of min(old, new) */
+    /* (hHeap, flags, mem, size): in place when the block's class still fits */
     uint32_t flags = A32(1), oldva = A32(2), size = A32(3);
+    if (!oldva) RET(heap_alloc(size), 4);
+    if ((MEM32(oldva - 4) & H_TAGMASK) != H_LIVE) { ds_set_last_error(87); RET(0, 4); }   /* not ours */
+    uint32_t old = MEM32(oldva - 8);
+    if (size <= h_cap(oldva)) {
+        if ((flags & 0x8) && size > old) memset(ds_hostptr(oldva + old), 0, size - old);
+        MEM32(oldva - 8) = size;
+        RET(oldva, 4);
+    }
+    if (flags & 0x10) RET(0, 4);                   /* HEAP_REALLOC_IN_PLACE_ONLY */
     uint32_t va = heap_alloc(size);
-    uint32_t old = oldva ? MEM32(oldva - 8) : 0;
-    if (oldva) memcpy(ds_hostptr(va), ds_hostptr(oldva), old < size ? old : size);
+    memcpy(ds_hostptr(va), ds_hostptr(oldva), old < size ? old : size);
     if ((flags & 0x8) && size > old) memset(ds_hostptr(va + old), 0, size - old);
+    heap_free(oldva);
     RET(va, 4);
 }
 
 /* ===================== virtual memory ===================== */
+/* VirtualAlloc: fresh arena pages (already zero); committing inside a region
+ * reserved earlier leaves its contents alone, as on Windows. VirtualFree with
+ * MEM_RELEASE gives the pages back to the OS (the VA range is not reused). */
+#define VA_MAX 4096
+static struct { uint32_t va, size; } g_vregion[VA_MAX]; static int g_nvregion;
+static uint64_t g_vbytes;
 static void sh_VirtualAlloc(void) {
     /* (lpAddress, dwSize, flAllocationType, flProtect) */
     uint32_t addr = A32(0), size = A32(1);
-    uint32_t va = addr ? addr : ds_arena_alloc(size, 0x1000);
-    memset(ds_hostptr(va), 0, size);
+    if (addr) RET(addr, 4);
+    size = (size + 0xFFFu) & ~0xFFFu;
+    uint32_t va = ds_arena_alloc(size, 0x10000);
+    int i = 0; while (i < g_nvregion && g_vregion[i].va) i++;
+    if (i < VA_MAX) { g_vregion[i].va = va; g_vregion[i].size = size; if (i == g_nvregion) g_nvregion++; }
+    g_vbytes += size;
     RET(va, 4);
 }
-static void sh_VirtualFree(void)      { RET(1, 3); }
+static void sh_VirtualFree(void) {
+    /* (lpAddress, dwSize, dwFreeType): MEM_RELEASE 0x8000, MEM_DECOMMIT 0x4000 */
+    uint32_t va = A32(0), size = A32(1), type = A32(2);
+    for (int i = 0; i < g_nvregion; i++) {
+        if (g_vregion[i].va != va && !(type == 0x4000u && va > g_vregion[i].va && va < g_vregion[i].va + g_vregion[i].size)) continue;
+        uint32_t n = type == 0x8000u || !size ? g_vregion[i].size - (va - g_vregion[i].va) : size;
+        madvise(ds_hostptr(va & ~0xFFFu), (n + 0xFFFu) & ~0xFFFu, MADV_DONTNEED);
+        if (type == 0x8000u) { g_vbytes -= g_vregion[i].size; g_vregion[i].va = 0; }
+        break;
+    }
+    RET(1, 3);
+}
+/* DS_HEAP_STATS=N: every N frames, where the guest's memory is */
+void ds_heap_stats(void) {
+    fprintf(stderr, "[heap] live %llu MB, quarantine %llu MB, free lists %llu MB, VirtualAlloc %llu MB, arena top %u MB; decoded audio %zu MB\n",
+            (unsigned long long)(g_heap_live >> 20), (unsigned long long)(g_quar_bytes >> 20),
+            (unsigned long long)(g_hfree_bytes >> 20), (unsigned long long)(g_vbytes >> 20), ds_arena_brk() >> 20,
+            ds_audio_pcm_bytes() >> 20);
+}
 static void sh_VirtualProtect(void)   { RET(1, 4); }
 
 /* ===================== TLS / FLS (real per-thread storage) =====================
@@ -269,9 +395,9 @@ static void sh_unlock(void)     { RET(0, 0); }
 static void sh_onexit(void)     { RET(A32(0), 0); }
 static void sh_dllonexit(void)  { RET(A32(0), 0); }
 /* cdecl libc passthroughs the CRT may import directly */
-static void sh_malloc(void)     { uint32_t n = A32(0); RET(ds_arena_alloc(n ? n : 1, 8), 0); }
-static void sh_free(void)       { RET(0, 0); }
-static void sh_calloc(void)     { uint32_t n = A32(0) * A32(1); uint32_t va = ds_arena_alloc(n ? n : 1, 8); memset(ds_hostptr(va), 0, n); RET(va, 0); }
+static void sh_malloc(void)     { RET(heap_alloc(A32(0)), 0); }
+static void sh_free(void)       { heap_free(A32(0)); RET(0, 0); }
+static void sh_calloc(void)     { uint32_t n = A32(0) * A32(1); uint32_t va = heap_alloc(n); memset(ds_hostptr(va), 0, n); RET(va, 0); }
 /* cdecl mem/str (operate on arena memory; pointer results come back as guest VAs) */
 static void sh_memset(void)  { uint32_t d = A32(0); memset(ds_hostptr(d), (int)A32(1), A32(2)); RET(d, 0); }
 static void sh_memcpy(void)  { uint32_t d = A32(0); memcpy(ds_hostptr(d), ds_hostptr(A32(1)), A32(2)); RET(d, 0); }

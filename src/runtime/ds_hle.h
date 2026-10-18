@@ -21,9 +21,11 @@
 #include <stddef.h>
 #include "recomp_types.h"   /* g_eax, g_esp, MEM32, ADDR, recomp_func_t, dispatch */
 
-/* the one screen: the R36S panel (window client rect, EGL surface) */
-#define DS_SCREEN_W 640
-#define DS_SCREEN_H 480
+/* the one screen (window client rect, EGL surface): the R36S panel, 640x480,
+ * unless DS_SCREEN=WxH says otherwise (set once at startup, ds_host.c) */
+extern int g_ds_screen_w, g_ds_screen_h;
+#define DS_SCREEN_W g_ds_screen_w
+#define DS_SCREEN_H g_ds_screen_h
 
 /* ---- stdcall argument access (arena-aware) ---- */
 #define A32(i)   ((uint32_t)MEM32(g_esp + 4u + 4u * (uint32_t)(i)))
@@ -40,13 +42,16 @@
 static inline void    *ds_hostptr(uint32_t va) { return (void *)(uintptr_t)ADDR(va); }
 
 /* ---- arena allocator: hands out guest VAs backed by the reserved arena ---- */
-uint32_t ds_arena_alloc(uint32_t size, uint32_t align);   /* 0 on exhaustion */
+uint32_t ds_arena_alloc(uint32_t size, uint32_t align);
+uint32_t ds_arena_brk(void);                   /* the bump heap's top (diagnostics) */
+void     ds_heap_stats(void);                    /* DS_HEAP_STATS=N prints it every N frames */   /* 0 on exhaustion */
 void     ds_arena_reset_to(uint32_t va);                  /* rare: rewind bump pointer */
 
 /* ---- handle table: opaque uint32_t tokens (NOT host pointers) ---- */
 uint32_t ds_handle_new(int kind, void *host_obj);         /* token >= 0x1 */
 void    *ds_handle_get(uint32_t token, int kind);         /* NULL if wrong kind/unknown */
 int      ds_handle_kind(uint32_t token);
+void     ds_handle_free(uint32_t token);                  /* CloseHandle: the slot is reused */
 
 /* handle kinds shared by the shim modules (ds_user32.c uses 0x20 and up) */
 enum { HK_HEAP = 1, HK_MODULE, HK_FILE /* std handle */, HK_MUTEX, HK_EVENT, HK_THREAD,
@@ -64,12 +69,37 @@ uint32_t  ds_last_import_va(void);                        /* inside a shim: the 
 void      mach_enter(void);
 void      mach_leave(void);
 int       ds_block_begin(void);                           /* release the machine around a blocking call */
+void      ds_yield(void);                                 /* preemption point: let a waiting guest thread run */
 void      ds_block_end(int depth);
 uint32_t  hle_call_guest(uint32_t va, int nargs, const uint32_t *args);
 
 /* ---- host services ---- */
 void      ds_fatal(const char *fmt, ...);
 extern int ds_trace;                                      /* DS_HLE_TRACE: one line per shim call */
+/* SDL2 backend (ds_sdl.c; DS_VIDEO=sdl at run time, DS_SDL at build time) */
+int       ds_sdl_active(void);
+int       ds_sdl_open(int w, int h);
+int       ds_sdl_make_current(int on);
+void      ds_sdl_swap(void);
+void      ds_sdl_pump(void (*post)(uint32_t msg, uint32_t wp, uint32_t lp));
+int       ds_sdl_xinput(uint16_t *buttons, uint8_t *lt, uint8_t *rt, int16_t thumbs[4]);
+/* sound (ds_audio.c; DS_AUDIO=sdl). Event ids are slots below DS_AUDIO_MAXEV. */
+#define DS_AUDIO_MAXEV 4096
+uint32_t  ds_audio_event_new(const char *path);
+void      ds_audio_event_start(uint32_t id);
+void      ds_audio_event_stop(uint32_t id);
+void      ds_audio_event_release(uint32_t id);
+void      ds_audio_event_volume(uint32_t id, float vol);
+void      ds_audio_event_pos(uint32_t id, float x, float y, float z);
+int       ds_audio_event_playing(uint32_t id);
+int       ds_audio_event_param_index(uint32_t id, const char *name);   /* -1: no such parameter */
+void      ds_audio_event_param(uint32_t id, int idx, float value);
+int       ds_audio_category(const char *name);                  /* index, made on first use */
+void      ds_audio_category_volume(int idx, float vol);
+float     ds_audio_category_get(int idx);
+size_t    ds_audio_pcm_bytes(void);                             /* decoded audio held (diagnostics) */
+void      ds_audio_listener(float x, float y, float z);
+uint32_t  ds_frame_count(void);                           /* frames swapped so far (ds_gles.c) */
 void      ds_set_last_error(uint32_t err);                /* kernel32 GetLastError value */
 const char *ds_cwd(void);                                 /* guest current directory (Z:\...) */
 int       ds_map_path(const char *gpath, char *host, size_t cap);   /* 1 exists, 0 leaf missing, <0 no */

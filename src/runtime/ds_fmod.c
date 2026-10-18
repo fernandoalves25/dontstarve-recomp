@@ -17,6 +17,9 @@
 #include "ds_hle.h"
 
 #define FMOD_OK 0u
+/* a float argument / a float in guest memory */
+static inline float AF32(int i) { uint32_t u = A32(i); float f; memcpy(&f, &u, 4); return f; }
+static inline float AFP(uint32_t va) { uint32_t u = MEM32(va); float f; memcpy(&f, &u, 4); return f; }
 #define FMOD_EVENT_VERSION 0x00044464u     /* what the exe was built against (it logs both) */
 #define FMOD_EVENT_STATE_READY 0x1u
 
@@ -31,7 +34,7 @@ enum { FO_EVENTSYSTEM = 0xF0D00001u, FO_SYSTEM, FO_SOUND, FO_CHANNEL, FO_DSP, FO
  * implementation). One generic shim serves every slot: it finds the method by
  * the VA it was called through. argc includes `this`. */
 static int fmod_trace = -1;
-enum { V_OK, V_OBJ, V_ZERO, V_ONE_F, V_SETUD, V_GETUD, V_READY, V_INFO };
+enum { V_OK, V_OBJ, V_ZERO, V_ONE_F, V_SETUD, V_GETUD, V_READY, V_INFO, V_CATSET, V_CATGET };
 typedef struct { const char *name; uint8_t argc, act, idx; uint32_t kind; } vmeth;
 static const vmeth k_project[] = {
     { "EventProject::release", 1, V_OK }, { "EventProject::getInfo", 2, V_OK },
@@ -47,7 +50,7 @@ static const vmeth k_category[] = {
     { "EventCategory::getCategoryByIndex", 3, V_OBJ, 2, FO_CATEGORY }, { "EventCategory::getNumCategories", 2, V_ZERO, 1 },
     { "EventCategory::getEventByIndex", 4, V_OBJ, 3, FO_EVENT }, { "EventCategory::getNumEvents", 2, V_ZERO, 1 },
     { "EventCategory::getParentCategory", 2, V_ZERO, 1 }, { "EventCategory::stopAllEvents", 1, V_OK },
-    { "EventCategory::setVolume", 2, V_OK }, { "EventCategory::getVolume", 2, V_ONE_F, 1 },
+    { "EventCategory::setVolume", 2, V_CATSET }, { "EventCategory::getVolume", 2, V_CATGET, 1 },
     { "EventCategory::setPitch", 3, V_OK }, { "EventCategory::getPitch", 3, V_ZERO, 1 },
     { "EventCategory::setPaused", 2, V_OK }, { "EventCategory::getPaused", 2, V_ZERO, 1 },
     { "EventCategory::setMute", 2, V_OK }, { "EventCategory::getMute", 2, V_ZERO, 1 },
@@ -82,6 +85,8 @@ static void sh_fmod_virtual(void) {           /* every EventProject/Category/Gro
     case V_ZERO:  if (p) MEM32(p) = 0; break;
     case V_ONE_F: if (p) MEM32(p) = 0x3F800000u; break;                  /* 1.0f */
     case V_READY: if (p) MEM32(p) = FMOD_EVENT_STATE_READY; break;
+    case V_CATSET: ds_audio_category_volume((int)MEM32(self + 8) - 1, AF32(1)); break;   /* +8: category index + 1 */
+    case V_CATGET: if (p) { float v = ds_audio_category_get((int)MEM32(self + 8) - 1); memcpy(ds_hostptr(p), &v, 4); } break;
     case V_SETUD: MEM32(self + 4) = A32(1); break;
     case V_GETUD: if (A32(1)) MEM32(A32(1)) = MEM32(self + 4); break;
     case V_INFO: {                                                        /* (this, int *index, char **name) */
@@ -154,28 +159,71 @@ static void sh_ES_getProjectByIndex(void) {              /* (this, index, EventP
 }
 static void sh_ES_getEvent(void) {                       /* (this, name, mode, Event **) */
     trace("getEvent", ASTR(1));
-    out_obj(A32(3), FO_EVENT);
+    uint32_t o = obj_new(FO_EVENT);
+    if (!(A32(2) & 0x4u)) MEM32(o + 8) = ds_audio_event_new(ASTR(1));   /* not FMOD_EVENT_INFOONLY */
+    if (A32(3)) MEM32(A32(3)) = o;
     RET(FMOD_OK, 4);
 }
-static void sh_ES_getCategory(void) { out_obj(A32(2), FO_CATEGORY); RET(FMOD_OK, 3); }   /* (this, name, EventCategory **) */
+static void sh_ES_getCategory(void) {                    /* (this, name, EventCategory **): one object per name */
+    static uint32_t objs[64], none;
+    int k = ds_audio_category(ASTR(1));
+    uint32_t o;
+    if (k >= 0 && k < 64) { if (!objs[k]) { objs[k] = obj_new(FO_CATEGORY); MEM32(objs[k] + 8) = (uint32_t)k + 1; } o = objs[k]; }
+    else { if (!none) none = obj_new(FO_CATEGORY); o = none; }
+    if (A32(2)) MEM32(A32(2)) = o;
+    RET(FMOD_OK, 3);
+}
 static void sh_ES_setReverbProperties(void) { RET(FMOD_OK, 2); }
 static void sh_ES_getReverbPreset(void) {                /* (this, name, FMOD_REVERB_PROPERTIES *, int *index) */
     if (A32(2)) memset(ds_hostptr(A32(2)), 0, 0x58);     /* sizeof(FMOD_REVERB_PROPERTIES) in 4.44 */
     if (A32(3)) MEM32(A32(3)) = 0;
     RET(FMOD_OK, 4);
 }
-static void sh_ES_set3DListenerAttributes(void) { RET(FMOD_OK, 6); }  /* (this, listener, pos, vel, forward, up) */
+static void sh_ES_set3DListenerAttributes(void) {     /* (this, listener, pos, vel, forward, up) */
+    uint32_t p = A32(2);
+    if (p && A32(1) == 0) ds_audio_listener(AFP(p), AFP(p + 4), AFP(p + 8));
+    RET(FMOD_OK, 6);
+}
 static void sh_ES_update(void)      { RET(FMOD_OK, 1); }
 static void sh_ES_release(void)     { RET(FMOD_OK, 1); }
 
-static void sh_Ev_start(void)       { RET(FMOD_OK, 1); }
-static void sh_Ev_stop(void)        { RET(FMOD_OK, 2); }  /* (this, bool immediate) */
-static void sh_Ev_release(void)     { RET(FMOD_OK, 3); }  /* (this, bool freeeventdata, bool waituntilready) */
-static void sh_Ev_setVolume(void)   { RET(FMOD_OK, 2); }  /* (this, float) */
-static void sh_Ev_set3DAttributes(void) { RET(FMOD_OK, 4); }  /* (this, pos, vel, orientation) */
-static void sh_Ev_getState(void)    { if (A32(1)) MEM32(A32(1)) = FMOD_EVENT_STATE_READY; RET(FMOD_OK, 2); }
-static void sh_Ev_getParameter(void){ out_obj(A32(2), FO_PARAM); RET(FMOD_OK, 3); }   /* (this, name, EventParameter **) */
-static void sh_EvP_setValue(void)   { RET(FMOD_OK, 2); }  /* (this, float) */
+/* an Event's audio id (ds_audio.c) lives in the object's extra word (+8) */
+#define EV_ID() (A32(0) ? MEM32(A32(0) + 8) : 0)
+static void sh_Ev_start(void)       { ds_audio_event_start(EV_ID()); RET(FMOD_OK, 1); }
+static void sh_Ev_stop(void)        { ds_audio_event_stop(EV_ID()); RET(FMOD_OK, 2); }    /* (this, bool immediate) */
+static void sh_Ev_release(void)     { ds_audio_event_release(EV_ID()); if (A32(0)) MEM32(A32(0) + 8) = 0; RET(FMOD_OK, 3); }  /* (this, freeeventdata, waituntilready) */
+static void sh_Ev_setVolume(void)   { ds_audio_event_volume(EV_ID(), AF32(1)); RET(FMOD_OK, 2); }   /* (this, float) */
+static void sh_Ev_set3DAttributes(void) {                 /* (this, pos, vel, orientation) */
+    uint32_t p = A32(1);
+    if (p) ds_audio_event_pos(EV_ID(), AFP(p), AFP(p + 4), AFP(p + 8));
+    RET(FMOD_OK, 4);
+}
+static void sh_Ev_getState(void) {                        /* READY, plus PLAYING while a voice runs */
+    if (A32(1)) MEM32(A32(1)) = FMOD_EVENT_STATE_READY | (ds_audio_event_playing(EV_ID()) ? 0x8u : 0u);
+    RET(FMOD_OK, 2);
+}
+/* EventParameter objects: +8 the event's audio id, +4 the parameter index.
+ * The game asks for one on every SetParameter, so they are kept per event slot
+ * (and one shared object for unknown names) instead of allocated each time. */
+static uint32_t g_pobj[DS_AUDIO_MAXEV][4], g_pnone;
+static void sh_Ev_getParameter(void) {                    /* (this, name, EventParameter **) */
+    uint32_t id = EV_ID(), o;
+    int k = id ? ds_audio_event_param_index(id, ASTR(1)) : -1;
+    if (id < DS_AUDIO_MAXEV && k >= 0 && k < 4) {
+        if (!g_pobj[id][k]) g_pobj[id][k] = obj_new(FO_PARAM);
+        o = g_pobj[id][k]; MEM32(o + 8) = id; MEM32(o + 4) = (uint32_t)k;
+    } else {
+        if (!g_pnone) g_pnone = obj_new(FO_PARAM);
+        o = g_pnone;
+    }
+    if (A32(2)) MEM32(A32(2)) = o;
+    RET(FMOD_OK, 3);
+}
+static void sh_EvP_setValue(void) {                       /* (this, float) */
+    uint32_t o = A32(0);
+    if (o && o != g_pnone) ds_audio_event_param(MEM32(o + 8), (int)MEM32(o + 4), AF32(1));
+    RET(FMOD_OK, 2);
+}
 
 /* ===================== FMOD Ex low level */
 static void sh_Sys_setFileSystem(void)      { RET(FMOD_OK, 8); }  /* (this, open, close, read, seek, asyncread, asynccancel, blockalign) */

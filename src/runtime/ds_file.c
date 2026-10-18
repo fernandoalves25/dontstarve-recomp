@@ -116,6 +116,20 @@ static void ensure_home(void) {   /* Documents and the game's folder in it exist
     const char *h = getenv("DS_HOME_DIR");
     char d[512]; snprintf(d, sizeof d, "%s/Documents/Klei/DoNotStarve", h && *h ? h : "build/home");
     mkdir_p(d);
+    /* First run only: start full screen at the panel's resolution. Without a
+     * settings.ini the game opens a 1280x720 window and draws past the
+     * 640x480 screen. The game rewrites this file itself from then on. */
+    char ini[600]; snprintf(ini, sizeof ini, "%s/settings.ini", d);
+    if (access(ini, F_OK) != 0) {
+        FILE *f = fopen(ini, "w");
+        if (f) {
+            fprintf(f, "[graphics]\nfullscreen = true\nfullscreen_width = %d\nfullscreen_height = %d\n"
+                       "windowed_width = %d\nwindowed_height = %d\ndisplay_id = 0\n",
+                    DS_SCREEN_W, DS_SCREEN_H, DS_SCREEN_W, DS_SCREEN_H);
+            fclose(f);
+            fprintf(stderr, "[file] first run: wrote %s (full screen %dx%d)\n", ini, DS_SCREEN_W, DS_SCREEN_H);
+        }
+    }
 }
 
 /* ===================== CreateFile */
@@ -176,8 +190,10 @@ static void sh_WriteFile(void) {              /* (h, buf, n, *written, ovl): fil
     RET(1, 5);
 }
 static void sh_CloseHandle(void) {
-    hostfile *f = hfile(A32(0));
-    if (f && f->fd >= 0) { close(f->fd); f->fd = -1; }
+    uint32_t h = A32(0);
+    hostfile *f = hfile(h);
+    if (f) { if (f->fd >= 0) close(f->fd); free(f); ds_handle_free(h); }
+    else if (ds_handle_kind(h) == HK_THREAD) ds_handle_free(h);   /* the object itself stays (a thread may still run) */
     RET(1, 1);
 }
 static void sh_GetFileType(void) {            /* FILE_TYPE_DISK for files, CHAR for std handles */
@@ -278,16 +294,19 @@ static void sh_GetFullPathNameW(void) {       /* (name, nBufferLength in WCHARs,
 }
 
 /* ===================== FindFirstFile / FindNextFile over a host directory */
-typedef struct { DIR *d; char dir[512]; char pat[256]; int wide; } finder;
-/* WIN32_FIND_DATA{A,W}: attrs +0, 3 FILETIMEs +4..+27, size hi +28 / lo +32, cFileName +44 */
-static int find_next(finder *f, uint32_t out) {
+typedef struct { DIR *d; char dir[512]; char pat[256]; } finder;
+/* WIN32_FIND_DATA{A,W}: attrs +0, 3 FILETIMEs +4..+27, size hi +28 / lo +32, cFileName +44.
+ * The layout follows the CALL, not the search: the game opens with
+ * FindFirstFileW (its wrapper narrows the result) and continues with
+ * FindNextFileA into a 320-byte WIN32_FIND_DATAA. */
+static int find_next(finder *f, uint32_t out, int wide) {
     struct dirent *de;
     while (f->d && (de = readdir(f->d))) {
         if (fnmatch(f->pat, de->d_name, FNM_CASEFOLD)) continue;
         char hp[800]; struct stat st;
         snprintf(hp, sizeof hp, "%s/%s", f->dir, de->d_name);
         if (stat(hp, &st)) continue;
-        memset(ds_hostptr(out), 0, f->wide ? 592 : 320);
+        memset(ds_hostptr(out), 0, wide ? 592 : 320);
         MEM32(out) = S_ISDIR(st.st_mode) ? 0x10u : 0x80u;
         uint64_t ft = ((uint64_t)st.st_mtime + 11644473600ull) * 10000000ull;
         for (int k = 0; k < 3; k++) { MEM32(out + 4 + 8 * k) = (uint32_t)ft; MEM32(out + 8 + 8 * k) = (uint32_t)(ft >> 32); }
@@ -296,7 +315,7 @@ static int find_next(finder *f, uint32_t out) {
         size_t n = strlen(de->d_name); if (n > 259) n = 259;
         for (size_t i = 0; i <= n; i++) {
             char c = i < n ? de->d_name[i] : 0;
-            if (f->wide) MEM16(out + 44 + 2 * (uint32_t)i) = (uint8_t)c; else MEM8(out + 44 + (uint32_t)i) = (uint8_t)c;
+            if (wide) MEM16(out + 44 + 2 * (uint32_t)i) = (uint8_t)c; else MEM8(out + 44 + (uint32_t)i) = (uint8_t)c;
         }
         return 1;
     }
@@ -308,11 +327,10 @@ static uint32_t find_first(const char *gpat, uint32_t out, int wide) {
     const char *pat = sl ? sl + 1 : g;
     char dirg[520]; if (sl) { *sl = 0; snprintf(dirg, sizeof dirg, "%s", g); } else snprintf(dirg, sizeof dirg, ".");
     finder *f = (finder *)calloc(1, sizeof *f);
-    f->wide = wide;
     snprintf(f->pat, sizeof f->pat, "%s", !strcmp(pat, "*.*") ? "*" : pat);
     if (ds_map_path(dirg, f->dir, sizeof f->dir) == 1) f->d = opendir(f->dir);
     if (trace_on()) fprintf(stderr, "[file] FindFirstFile(%s) -> %s/%s%s\n", gpat, f->dir, f->pat, f->d ? "" : "  NO DIR");
-    if (!find_next(f, out)) {
+    if (!find_next(f, out, wide)) {
         if (f->d) closedir(f->d);
         free(f);
         ds_set_last_error(ERROR_FILE_NOT_FOUND);
@@ -326,12 +344,15 @@ static uint32_t find_first(const char *gpat, uint32_t out, int wide) {
 }
 static void sh_FindFirstFileA(void) { RET(find_first(ASTR(0), A32(1), 0), 2); }
 static void sh_FindFirstFileW(void) { char p[520]; guest_w_to_a(A32(0), p, sizeof p); RET(find_first(p, A32(1), 1), 2); }
-static void sh_FindNextFileW(void)  { finder *f = ds_handle_get(A32(0), HK_FIND); if (f && find_next(f, A32(1))) RET(1, 2); ds_set_last_error(18); RET(0, 2); }
-static void sh_FindNextFileA(void)  { finder *f = ds_handle_get(A32(0), HK_FIND); if (f && find_next(f, A32(1))) RET(1, 2); ds_set_last_error(18); RET(0, 2); }
+static void sh_FindNextFileW(void)  { finder *f = ds_handle_get(A32(0), HK_FIND); if (f && find_next(f, A32(1), 1)) RET(1, 2); ds_set_last_error(18); RET(0, 2); }
+static void sh_FindNextFileA(void)  { finder *f = ds_handle_get(A32(0), HK_FIND); if (f && find_next(f, A32(1), 0)) RET(1, 2); ds_set_last_error(18); RET(0, 2); }
 static void sh_FindClose(void) {
-    finder *f = ds_handle_get(A32(0), HK_FIND);
-    if (f && f->d) { closedir(f->d); f->d = NULL; }
-    RET(f != NULL, 1);
+    uint32_t h = A32(0);
+    finder *f = ds_handle_get(h, HK_FIND);
+    if (!f) RET(0, 1);
+    if (f->d) closedir(f->d);
+    free(f); ds_handle_free(h);
+    RET(1, 1);
 }
 
 const ds_shim ds_file[] = {
