@@ -1,6 +1,6 @@
 # Don't Starve — Native ARM64 Recompilation for R36S
 
-**[English](#english) · [Português](#português)** · 📊 **[Live status dashboard](docs/index.html)**
+**[English](#english) · [Português](#português)** · 📊 **[Live status dashboard](https://fernandoalves25.github.io/dontstarve-recomp/)**
 
 ![functions lifted](docs/badge-functions.svg)
 ![lift failures](docs/badge-failures.svg)
