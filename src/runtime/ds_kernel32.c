@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <stdint.h>
 #include <pthread.h>
@@ -79,21 +80,30 @@ static void sh_ExitProcess(void) { fprintf(stderr, "[ds] guest ExitProcess(%u)\n
 static void sh_GetProcessHeap(void) { RET(ds_handle_new(HK_HEAP, 0), 0); }
 static void sh_HeapCreate(void)     { RET(ds_handle_new(HK_HEAP, 0), 3); }
 static void sh_HeapDestroy(void)    { RET(1, 1); }
+/* Bump allocator with an 8-byte header holding the block size, so HeapSize
+ * (the CRT's _msize, e.g. when it grows the onexit table) and HeapReAlloc's
+ * copy see the real size. Blocks stay 8-aligned. */
+static uint32_t heap_alloc(uint32_t size) {
+    uint32_t va = ds_arena_alloc((size ? size : 1) + 8u, 8) + 8u;
+    MEM32(va - 8) = size;
+    return va;
+}
 static void sh_HeapAlloc(void) {
     /* (hHeap, dwFlags, dwBytes) */
     uint32_t flags = A32(1), size = A32(2);
-    uint32_t va = ds_arena_alloc(size ? size : 1, 8);
+    uint32_t va = heap_alloc(size);
     if (flags & 0x8) memset(ds_hostptr(va), 0, size);  /* HEAP_ZERO_MEMORY */
     RET(va, 3);
 }
 static void sh_HeapFree(void)   { RET(1, 3); }
-static void sh_HeapSize(void)   { RET(0, 3); }
+static void sh_HeapSize(void)   { uint32_t p = A32(2); RET(p ? MEM32(p - 8) : 0xFFFFFFFFu, 3); }
 static void sh_HeapReAlloc(void) {
-    /* (hHeap, flags, mem, size) - bump allocator: new block + copy (old size
-     * unknown; copy `size` which is >= old for a grow, the common case). */
-    uint32_t oldva = A32(2), size = A32(3);
-    uint32_t va = ds_arena_alloc(size ? size : 1, 8);
-    if (oldva) memcpy(ds_hostptr(va), ds_hostptr(oldva), size);
+    /* (hHeap, flags, mem, size): new block + copy of min(old, new) */
+    uint32_t flags = A32(1), oldva = A32(2), size = A32(3);
+    uint32_t va = heap_alloc(size);
+    uint32_t old = oldva ? MEM32(oldva - 8) : 0;
+    if (oldva) memcpy(ds_hostptr(va), ds_hostptr(oldva), old < size ? old : size);
+    if ((flags & 0x8) && size > old) memset(ds_hostptr(va + old), 0, size - old);
     RET(va, 4);
 }
 
@@ -344,7 +354,16 @@ static void sh_GetUserDefaultLCID(void) { RET(0x0409, 0); }
 static void sh_IsValidLocale(void) { RET(1, 2); }
 static void sh_EnumSystemLocalesA(void) { RET(1, 2); }
 
-static void sh_GetModuleHandleW(void)   { RET(A32(0) ? ds_handle_new(HK_MODULE, 0) : 0x00400000u, 1); }
+static void sh_GetModuleHandleW(void) {
+    uint32_t p = A32(0);
+    if (!p) RET(0x00400000u, 1);
+    char nm[64]; uint32_t i = 0;                  /* narrow the name (ASCII) */
+    for (; i < sizeof nm - 1 && MEM16(p + 2 * i); i++) nm[i] = (char)MEM16(p + 2 * i);
+    nm[i] = 0;
+    /* no CLR: the CRT's exit path must not take the CorExitProcess route */
+    if (!strncasecmp(nm, "mscoree", 7)) { g_last_error = 126; RET(0, 1); }   /* ERROR_MOD_NOT_FOUND */
+    RET(ds_handle_new(HK_MODULE, 0), 1);
+}
 static void sh_GetModuleFileNameW(void) { if (A32(2)) MEM16(A32(1)) = 0; RET(0, 3); }
 static void sh_GetStartupInfoW(void)    { uint32_t p = A32(0); memset(ds_hostptr(p), 0, 68); MEM32(p) = 68; RETV(1); }
 static void sh_GetVersionExW(void)      { uint32_t p = A32(0); MEM32(p+4)=6; MEM32(p+8)=1; MEM32(p+12)=7600; MEM32(p+16)=2; RET(1,1); }
@@ -595,4 +614,5 @@ const ds_shim ds_kernel32[] = {
 void ds_host_init(void) {
     ds_register(ds_kernel32);
     ds_register(ds_win32);
+    ds_register(ds_user32);
 }

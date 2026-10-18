@@ -96,6 +96,9 @@ const ds_shim ds_win32[] = {
     { "CoSetProxyBlanket", sh_CoSetProxyBlanket }, { "CoCreateInstance", sh_CoCreateInstance },
     { "SysAllocString", sh_SysAllocString }, { "SysFreeString", sh_SysFreeString },
     { "VariantClear", sh_VariantClear },
+    /* the exe imports OLEAUT32 by ordinal */
+    { "OLEAUT32.dll#2", sh_SysAllocString }, { "OLEAUT32.dll#6", sh_SysFreeString },
+    { "OLEAUT32.dll#9", sh_VariantClear },
     { "RegisterEventSourceA", sh_RegisterEventSourceA },
     { "DeregisterEventSource", sh_DeregisterEventSource }, { "ReportEventA", sh_ReportEventA },
     { "GetProcessMemoryInfo", sh_GetProcessMemoryInfo },

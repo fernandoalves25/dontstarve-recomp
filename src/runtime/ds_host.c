@@ -330,7 +330,8 @@ uint32_t ds_resolve_or_stub(const char *name) {
     uint32_t va = ds_resolve(name);
     if (va) return va;
     if (g_shim_n >= MAX_SHIMS) ds_fatal("too many shims");
-    g_shim[g_shim_n].name = name;   /* IAT name strings live in the arena for the run */
+    /* copy: a GetProcAddress name may sit in a guest stack buffer that is reused */
+    g_shim[g_shim_n].name = strdup(name);
     g_shim[g_shim_n].fn   = ds_unimplemented_import;
     g_shim[g_shim_n].va   = SHIM_BASE + SHIM_STEP * (uint32_t)g_shim_n;
     return g_shim[g_shim_n++].va;

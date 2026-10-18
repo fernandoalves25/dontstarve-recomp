@@ -43,7 +43,7 @@ and the PC UI.
 **How much of the game actually runs.** Every function is already *lifted* to C — that's the
 easy part. What matters is how many have **executed** natively without crashing. Each cell ≈ 16
 functions: **bright = ran at runtime**, dim = lifted but never reached yet. Today execution runs
-through the CRT startup into the game's own `main()`, and stops at the first Win32 window calls. The map
+through the CRT startup into the game's own `main()`, up to its Steam check, and exits cleanly. The map
 fills in as the port progresses (measured with a `COVERAGE=1` build, see `scripts/coverage_counts.py`).
 
 ![progress map](docs/progress-en.svg)
@@ -58,22 +58,34 @@ fills in as the port progresses (measured with a `COVERAGE=1` build, see `script
 | M3 Compiles + links (exe + 2 lifted CRT DLLs) | ✅ done |
 | M4 Arena host, IAT binding (955/955), CRT `DllMain` runs | ✅ done |
 | M5 CRT initialization — both CRT `DllMain`s + exe CRT startup, game `main()` runs | ✅ done |
-| **M6 Native main menu** | 🟡 **in progress — Win32 window + GLES2 context** |
+| **M6 Native main menu** | 🟡 **in progress — USER32/GDI32 headless window done; blocked on the Steam check** |
 | M7 Stability | ⬜ |
 | M8 Audio (FMOD Ex shim) | ⬜ |
 | M9 PortMaster package + FPS vs box64 | ⬜ |
 
 ### 🙋 Where help is needed
 
-The recompiled VC9 CRT now initializes completely and the game's own `main()` runs:
-**630 functions executed, 262 of them in the game exe**. It prints its first line (a failed WMI
-hardware query — harmless). Every missing import stops the run with its own name, so the loop
-is: write the shim, rebuild, rerun. Next up:
+**Current wall: the Steam check, not a missing import.** USER32 + GDI32 now have a headless
+shim layer ([src/runtime/ds_user32.c](src/runtime/ds_user32.c)): one fixed 640×480 window (the
+R36S screen), a single display mode and monitor, an empty message queue, and the guest `WndProc`
+driven for `WM_NCCREATE`/`WM_CREATE`/`WM_SIZE`/`WM_SHOWWINDOW`/`WM_ACTIVATE`. With it the game runs
+further, **914 functions executed (520 in the game exe)**, then calls `SteamAPI_Init()`. Our
+`steam_api` shim honestly answers "not running under Steam", so the Steam build shows its own
+*"Steam must be running to play this game"* box and exits cleanly (static destructors and
+`ExitProcess` included). This exe has no offline path: it checks before it creates its window.
 
-- **USER32 / GDI32** — window, message pump, cursor, display modes (planned over SDL2/KMSDRM).
-- **libEGL / libGLESv2** (imported by ordinal, ANGLE) → bridge to native GLES2 on the Mali GPU.
-- **FMOD Ex + FMOD Event** API shim; **XINPUT/DINPUT8** → SDL2 game controller; file I/O
-  mapped onto the game data directory.
+This project **will not fake Steam ownership or licences**. Ways forward we'd like input on:
+
+- **A DRM-free build of the game.** The pipeline doesn't depend on any one exe, so a standalone
+  `dontstarve.exe` from your own purchase would be re-lifted the same way.
+- Meanwhile, the next layers can be built and tested on their own: the **libEGL/libGLESv2**
+  bridge (ANGLE, imported by ordinal) to native GLES2, **SDL2** behind the fake window
+  (KMSDRM on the device), the **FMOD Ex + FMOD Event** shim, **XINPUT/DINPUT8** → SDL2.
+
+Runtime fixes on the way (useful for anyone using pcrecomp): import-stub names were dangling
+pointers (`GetProcAddress` stack buffers and ordinal names like `OLEAUT32.dll#9`), so a missing
+import reported an empty or wrong name. `HeapSize` returned 0, so the CRT's `_msize`-sized onexit
+table walked into string data at exit. Heap blocks now carry a size header.
 
 How the CRT wall fell (for anyone hitting similar walls with pcrecomp): kernel32
 `DecodePointer` shared a cdecl shim and didn't pop its argument, shifting `pop esi/pop ebp` in
@@ -146,7 +158,7 @@ tudo que o port Android perde: todas as DLCs (RoG, Shipwrecked, Hamlet), **mods*
 **Quanto do jogo realmente roda.** Todas as funções já estão *liftadas* para C — essa é a parte
 fácil. O que importa é quantas já **executaram** nativamente sem crashar. Cada célula ≈ 16 funções:
 **clara = rodou em runtime**, escura = liftada mas ainda não alcançada. Hoje a execução passa pelo
-startup do CRT e entra no `main()` do jogo, parando nas primeiras chamadas de janela do Win32. O mapa
+startup do CRT, entra no `main()` do jogo, vai até a checagem da Steam e sai de forma limpa. O mapa
 vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, veja `scripts/coverage_counts.py`).
 
 ![mapa de progresso](docs/progress-pt.svg)
@@ -161,22 +173,36 @@ vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, ve
 | M3 Compila + linka (exe + 2 DLLs do CRT liftadas) | ✅ feito |
 | M4 Host arena, bind da IAT (955/955), `DllMain` do CRT roda | ✅ feito |
 | M5 Inicialização do CRT — `DllMain` dos 2 CRTs + startup do exe, `main()` do jogo roda | ✅ feito |
-| **M6 Menu principal nativo** | 🟡 **em progresso — janela Win32 + contexto GLES2** |
+| **M6 Menu principal nativo** | 🟡 **em progresso — janela headless USER32/GDI32 pronta; travado na checagem da Steam** |
 | M7 Estabilidade | ⬜ |
 | M8 Áudio (shim do FMOD Ex) | ⬜ |
 | M9 Pacote PortMaster + FPS vs box64 | ⬜ |
 
 ### 🙋 Onde precisamos de ajuda
 
-O CRT VC9 recompilado agora inicializa por completo e o `main()` do próprio jogo roda:
-**630 funções executadas, 262 delas no exe do jogo**. Ele já imprime a primeira linha (uma
-consulta WMI de hardware que falha — inofensiva). Cada import faltando para a execução com o
-próprio nome, então o ciclo é: escrever o shim, rebuildar, rodar de novo. Próximos passos:
+**Parede atual: a checagem da Steam, não um import faltando.** USER32 + GDI32 agora têm uma
+camada de shims headless ([src/runtime/ds_user32.c](src/runtime/ds_user32.c)): uma janela fixa de
+640×480 (a tela do R36S), um único modo de vídeo e monitor, fila de mensagens vazia, e o `WndProc`
+do jogo recebendo `WM_NCCREATE`/`WM_CREATE`/`WM_SIZE`/`WM_SHOWWINDOW`/`WM_ACTIVATE`. Com isso o jogo
+avança mais, **914 funções executadas (520 no exe do jogo)**, e chama `SteamAPI_Init()`. Nosso shim
+de `steam_api` responde com honestidade "não está rodando sob a Steam", então o build Steam mostra a
+própria caixa *"Steam must be running to play this game"* e sai de forma limpa (incluindo os
+destrutores estáticos e o `ExitProcess`). Esse exe não tem caminho offline: a checagem vem antes de
+criar a janela.
 
-- **USER32 / GDI32** — janela, message pump, cursor, modos de vídeo (planejado sobre SDL2/KMSDRM).
-- **libEGL / libGLESv2** (importados por ordinal, ANGLE) → ponte para GLES2 nativo na GPU Mali.
-- Shim da API **FMOD Ex + FMOD Event**; **XINPUT/DINPUT8** → SDL2 game controller; I/O de
-  arquivos mapeado para o diretório de dados do jogo.
+Este projeto **não vai falsificar posse nem licença da Steam**. Caminhos em que queremos opinião:
+
+- **Um build DRM-free do jogo.** O pipeline não depende de um exe específico, então um
+  `dontstarve.exe` standalone da sua própria compra seria liftado do mesmo jeito.
+- Enquanto isso, as próximas camadas dá para construir e testar sozinhas: a ponte
+  **libEGL/libGLESv2** (ANGLE, importados por ordinal) para GLES2 nativo, **SDL2** por trás da
+  janela falsa (KMSDRM no aparelho), o shim **FMOD Ex + FMOD Event**, **XINPUT/DINPUT8** → SDL2.
+
+Correções de runtime no caminho (úteis para quem usa o pcrecomp): os nomes dos stubs de import
+eram ponteiros pendurados (buffers de pilha do `GetProcAddress` e nomes por ordinal como
+`OLEAUT32.dll#9`), então um import faltando aparecia com nome vazio ou errado. O `HeapSize`
+retornava 0, e a tabela onexit do CRT (dimensionada por `_msize`) andava por dados de string na
+saída. Agora os blocos do heap têm um cabeçalho com o tamanho.
 
 Como a parede do CRT caiu (para quem bater em paredes parecidas com o pcrecomp): o
 `DecodePointer` do kernel32 usava um shim cdecl e não desempilhava o argumento, deslocando o
@@ -202,7 +228,8 @@ Os comandos são os mesmos da seção em inglês acima.
 docs/          design decisions, architecture, status page (index.html)
 scripts/       lift + build drivers (run_lift.py, lift_dll.sh, find_data_funcs.py, build_*.sh, gen_status.py)
 src/runtime/   arena host (ds_host.c), shim ABI (ds_hle.h), kernel32/CRT shims (ds_kernel32.c),
-               platform shims: winmm, steam_api, COM, shell32 (ds_win32.c)
+               platform shims: winmm, steam_api, COM, shell32 (ds_win32.c),
+               USER32 + GDI32 headless window (ds_user32.c)
 patches/       this repo's pcrecomp lifter fixes, applied on top of a847ef6
 config/        overrides.txt (native HLE of CRT EH helpers), hooks.txt
 ```

@@ -88,7 +88,7 @@ const T = {
   title:"Don't Starve — Native ARM64 recompilation for R36S",
   sub:"Static recompilation of the Windows EXE (x86-32) into native C99 via pcrecomp — no box64, no runtime emulation. Keeps all DLCs, mods, the PT-BR translation and the PC UI.",
   bRan:"Executed at runtime", bFns:"Functions lifted", bFail:"Lift failures", bImp:"Imports resolved", bPhase:"Phase",
-  phase:"CRT bring-up",
+  phase:"Win32 + window bring-up",
   hLift:"How much actually runs — by module",
   lgLift:"ran at runtime", lgPrune:"lifted, not run yet", lgCell:"each cell ≈ 16 functions — lifting is the easy part; running is the real progress",
   fns:"fns", pruned:"pruned",
@@ -106,14 +106,14 @@ const T = {
    ["Audio (FMOD Ex shim)","FSB5/Vorbis banks"],
    ["PortMaster package + FPS","vs the ~20–22 FPS box64 ceiling"]],
   hHelp:"Where the community can help",
-  help:"<b>Current wall: the Win32 surface the game touches before its first frame.</b> The recompiled VC9 CRT now initializes completely (both DllMains, the exe CRT startup) and the game's own <code>main()</code> runs: 630 functions executed, 262 of them in the game exe. It already prints its first line (a failed WMI hardware query, harmless). The next imports are USER32 window management, then the ANGLE <code>libEGL</code>/<code>libGLESv2</code> bridge to native GLES2. Each missing import stops the run with its own name, so the loop is: add the shim, rebuild, rerun.<br><br>How the CRT wall fell: kernel32 <code>DecodePointer</code> shared a cdecl shim and did not pop its argument, which shifted <code>pop esi/pop ebp</code> in the CRT's <code>_decode_pointer</code> (the 0xDEAD0000 <code>this</code>); then lifter support for <code>lock xadd</code> and <code>rep ret</code>; then relocation-based seeds for CRT init tables that recursive descent never reaches. Help wanted: USER32/GDI32 shims over SDL2, the EGL/GLES2 bridge, FMOD Ex.",
+  help:"<b>Current wall: the Steam check, not a missing import.</b> USER32 + GDI32 now have a headless shim layer: one fixed 640×480 window (the R36S screen), a single display mode and monitor, an empty message queue, and the guest <code>WndProc</code> driven for <code>WM_NCCREATE</code>/<code>WM_CREATE</code>/<code>WM_SIZE</code>/<code>WM_SHOWWINDOW</code>/<code>WM_ACTIVATE</code>. With it the game runs further, 914 functions executed (520 of them in the game exe), then calls <code>SteamAPI_Init()</code>. Our steam_api shim honestly answers \"not running under Steam\", so the Steam build shows its own \"Steam must be running to play this game\" box and exits cleanly. This exe has no offline path, and this project will not fake Steam ownership or licences.<br><br>Help wanted: a DRM-free build of the game (the pipeline doesn't depend on any one exe, so a standalone <code>dontstarve.exe</code> from your own purchase would be re-lifted the same way). Meanwhile the next layers can be built and tested on their own: the ANGLE <code>libEGL</code>/<code>libGLESv2</code> bridge to native GLES2, SDL2 behind the fake window, FMOD Ex, XINPUT/DINPUT8.",
   legal:"<b>Legal:</b> this repository contains only original tooling and runtime — <b>no game binaries, assets or code</b>. You need your own legal copy of Don't Starve. Lifted C and all game material stay local (git-ignored). Don't Starve © Klei Entertainment; not affiliated with Klei. · Tooling under the MIT license."
  },
  pt:{
   title:"Don't Starve — Recompilação nativa ARM64 para R36S",
   sub:"Recompilação estática do EXE Windows (x86-32) para C99 nativo via pcrecomp — sem box64, sem emulação em runtime. Preserva todas as DLCs, mods, a tradução PT-BR e a UI de PC.",
   bRan:"Executadas em runtime", bFns:"Funções liftadas", bFail:"Falhas de lift", bImp:"Imports resolvidos", bPhase:"Fase",
-  phase:"Bring-up do CRT",
+  phase:"Bring-up Win32 + janela",
   hLift:"Quanto realmente roda — por módulo",
   lgLift:"rodou em runtime", lgPrune:"liftada, ainda não rodou", lgCell:"cada célula ≈ 16 funções — liftar é a parte fácil; rodar é o progresso real",
   fns:"fns", pruned:"podadas",
@@ -131,7 +131,7 @@ const T = {
    ["Áudio (shim do FMOD Ex)","banks FSB5/Vorbis"],
    ["Pacote PortMaster + FPS","vs o teto de ~20–22 FPS do box64"]],
   hHelp:"Onde a comunidade pode ajudar",
-  help:"<b>Parede atual: a superfície Win32 que o jogo usa antes do primeiro frame.</b> O CRT VC9 recompilado agora inicializa por completo (os dois DllMain e o startup do CRT do exe) e o <code>main()</code> do próprio jogo roda: 630 funções executadas, 262 delas no exe do jogo. Ele já imprime a primeira linha (uma consulta WMI de hardware que falha, inofensiva). Os próximos imports são o gerenciamento de janela do USER32 e depois a ponte ANGLE <code>libEGL</code>/<code>libGLESv2</code> para GLES2 nativo. Cada import faltando para a execução com o próprio nome, então o ciclo é: escrever o shim, rebuildar, rodar de novo.<br><br>Como a parede do CRT caiu: o <code>DecodePointer</code> do kernel32 usava um shim cdecl e não desempilhava o argumento, o que deslocava o <code>pop esi/pop ebp</code> no <code>_decode_pointer</code> do CRT (o <code>this</code> = 0xDEAD0000); depois suporte no lifter a <code>lock xadd</code> e <code>rep ret</code>; depois seeds por relocação para as tabelas de init do CRT que a descida recursiva nunca alcança. Procura-se ajuda: shims USER32/GDI32 sobre SDL2, a ponte EGL/GLES2, FMOD Ex.",
+  help:"<b>Parede atual: a checagem da Steam, não um import faltando.</b> USER32 + GDI32 agora têm uma camada de shims headless: uma janela fixa de 640×480 (a tela do R36S), um único modo de vídeo e monitor, fila de mensagens vazia, e o <code>WndProc</code> do jogo recebendo <code>WM_NCCREATE</code>/<code>WM_CREATE</code>/<code>WM_SIZE</code>/<code>WM_SHOWWINDOW</code>/<code>WM_ACTIVATE</code>. Com isso o jogo avança mais, 914 funções executadas (520 delas no exe do jogo), e chama <code>SteamAPI_Init()</code>. Nosso shim de steam_api responde com honestidade \"não está rodando sob a Steam\", então o build Steam mostra a própria caixa \"Steam must be running to play this game\" e sai de forma limpa. Esse exe não tem caminho offline, e este projeto não vai falsificar posse nem licença da Steam.<br><br>Procura-se ajuda: um build DRM-free do jogo (o pipeline não depende de um exe específico, então um <code>dontstarve.exe</code> standalone da sua própria compra seria liftado do mesmo jeito). Enquanto isso, as próximas camadas dá para construir e testar sozinhas: a ponte ANGLE <code>libEGL</code>/<code>libGLESv2</code> para GLES2 nativo, SDL2 por trás da janela falsa, FMOD Ex, XINPUT/DINPUT8.",
   legal:"<b>Legal:</b> este repositório contém apenas ferramentas e runtime originais — <b>nenhum binário, asset ou código do jogo</b>. Você precisa da sua própria cópia legítima de Don't Starve. O C liftado e todo material do jogo ficam locais (fora do git). Don't Starve © Klei Entertainment; sem afiliação com a Klei. · Ferramentas sob licença MIT."
  }
 };
