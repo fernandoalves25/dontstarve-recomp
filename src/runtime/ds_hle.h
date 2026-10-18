@@ -74,6 +74,13 @@ uint32_t  hle_call_guest(uint32_t va, int nargs, const uint32_t *args);
 /* ---- host services ---- */
 void      ds_fatal(const char *fmt, ...);
 extern int ds_trace;                                      /* DS_HLE_TRACE: one line per shim call */
+/* SDL2 backend (ds_sdl.c; DS_VIDEO=sdl at run time, DS_SDL at build time) */
+int       ds_sdl_active(void);
+int       ds_sdl_open(int w, int h);
+int       ds_sdl_make_current(int on);
+void      ds_sdl_swap(void);
+void      ds_sdl_pump(void (*post)(uint32_t msg, uint32_t wp, uint32_t lp));
+int       ds_sdl_xinput(uint16_t *buttons, uint8_t *lt, uint8_t *rt, int16_t thumbs[4]);
 uint32_t  ds_frame_count(void);                           /* frames swapped so far (ds_gles.c) */
 void      ds_set_last_error(uint32_t err);                /* kernel32 GetLastError value */
 const char *ds_cwd(void);                                 /* guest current directory (Z:\...) */

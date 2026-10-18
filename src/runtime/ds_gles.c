@@ -51,6 +51,7 @@ static uint32_t cfg_tok(EGLConfig c) {
 #define TOK_GET(arr, n, base, t) (((t) >= (base) && (t) < (base) + (uint32_t)(n)) ? arr[(t) - (base)] : NULL)
 
 static void sh_eglGetDisplay(void) {             /* (EGLNativeDisplayType: the window's HDC) */
+    if (ds_sdl_active()) RET(TOK_DISPLAY, 1);      /* SDL owns the display, window and context */
     if (g_dpy == EGL_NO_DISPLAY) {
         PFNEGLGETPLATFORMDISPLAYEXTPROC gpd =
             (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
@@ -60,6 +61,7 @@ static void sh_eglGetDisplay(void) {             /* (EGLNativeDisplayType: the w
     RET(g_dpy == EGL_NO_DISPLAY ? 0 : TOK_DISPLAY, 1);
 }
 static void sh_eglInitialize(void) {             /* (dpy, *major, *minor) */
+    if (ds_sdl_active()) { if (A32(1)) MEM32(A32(1)) = 1; if (A32(2)) MEM32(A32(2)) = 4; RET(1, 3); }
     EGLint ma = 0, mi = 0;
     EGLBoolean ok = eglInitialize(g_dpy, &ma, &mi);
     if (A32(1)) MEM32(A32(1)) = 1;               /* report EGL 1.4, as ANGLE did */
@@ -88,6 +90,11 @@ static int attribs_for_config(uint32_t va, EGLint *out, int cap) {
     return n;
 }
 static void sh_eglChooseConfig(void) {           /* (dpy, attribs, configs, size, *num) */
+    if (ds_sdl_active()) {                         /* one config: the SDL window's */
+        if (A32(2) && A32(3)) MEM32(A32(2)) = TOK_CONFIG;
+        if (A32(4)) MEM32(A32(4)) = 1;
+        RET(1, 5);
+    }
     EGLint at[128]; attribs_for_config(A32(1), at, 128);
     uint32_t out = A32(2); EGLint size = (EGLint)A32(3), num = 0;
     EGLConfig cs[MAX_TOK];
@@ -99,6 +106,11 @@ static void sh_eglChooseConfig(void) {           /* (dpy, attribs, configs, size
     RET(ok, 5);
 }
 static void sh_eglGetConfigs(void) {             /* (dpy, configs, size, *num): pbuffer + GLES2 ones only */
+    if (ds_sdl_active()) {
+        if (A32(1) && A32(2)) MEM32(A32(1)) = TOK_CONFIG;
+        if (A32(3)) MEM32(A32(3)) = 1;
+        RET(1, 4);
+    }
     EGLint at[] = { EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE };
     uint32_t out = A32(1); EGLint size = (EGLint)A32(2), num = 0;
     EGLConfig cs[MAX_TOK];
@@ -109,6 +121,7 @@ static void sh_eglGetConfigs(void) {             /* (dpy, configs, size, *num): 
     RET(ok, 4);
 }
 static void sh_eglCreateWindowSurface(void) {    /* (dpy, config, HWND, attribs) -> a pbuffer */
+    if (ds_sdl_active()) RET(ds_sdl_open(DS_SCREEN_W, DS_SCREEN_H) == 0 ? TOK_SURFACE : 0, 4);
     EGLConfig c = TOK_GET(g_cfg, g_cfg_n, TOK_CONFIG, A32(1));
     EGLint pa[] = { EGL_WIDTH, DS_SCREEN_W, EGL_HEIGHT, DS_SCREEN_H, EGL_NONE };
     EGLSurface s = c ? eglCreatePbufferSurface(g_dpy, c, pa) : EGL_NO_SURFACE;
@@ -119,6 +132,7 @@ static void sh_eglCreateWindowSurface(void) {    /* (dpy, config, HWND, attribs)
     RET(TOK_SURFACE + (uint32_t)g_surf_n++, 4);
 }
 static void sh_eglCreateContext(void) {          /* (dpy, config, share, attribs) */
+    if (ds_sdl_active()) RET(TOK_CONTEXT, 4);     /* SDL created it with the window */
     EGLConfig c = TOK_GET(g_cfg, g_cfg_n, TOK_CONFIG, A32(1));
     EGLContext share = A32(2) ? TOK_GET(g_ctx, g_ctx_n, TOK_CONTEXT, A32(2)) : EGL_NO_CONTEXT;
     EGLint at[32]; int n = 0;
@@ -134,6 +148,7 @@ static void sh_eglCreateContext(void) {          /* (dpy, config, share, attribs
     RET(TOK_CONTEXT + (uint32_t)g_ctx_n++, 4);
 }
 static void sh_eglMakeCurrent(void) {            /* (dpy, draw, read, ctx) */
+    if (ds_sdl_active()) RET(ds_sdl_make_current(A32(3) != 0), 4);
     EGLSurface d = A32(1) ? TOK_GET(g_surf, g_surf_n, TOK_SURFACE, A32(1)) : EGL_NO_SURFACE;
     EGLSurface r = A32(2) ? TOK_GET(g_surf, g_surf_n, TOK_SURFACE, A32(2)) : EGL_NO_SURFACE;
     EGLContext x = A32(3) ? TOK_GET(g_ctx, g_ctx_n, TOK_CONTEXT, A32(3)) : EGL_NO_CONTEXT;
@@ -167,7 +182,9 @@ static void sh_eglSwapBuffers(void) {            /* (dpy, surface) */
     EGLSurface s = TOK_GET(g_surf, g_surf_n, TOK_SURFACE, A32(1));
     g_frame++;
     if (every > 0 && g_frame % (uint32_t)every == 0) dump_frame(g_frame);
-    EGLBoolean ok = s ? eglSwapBuffers(g_dpy, s) : EGL_FALSE;
+    EGLBoolean ok;
+    if (ds_sdl_active()) { ds_sdl_swap(); ok = EGL_TRUE; }
+    else ok = s ? eglSwapBuffers(g_dpy, s) : EGL_FALSE;
     ds_yield();                                  /* a frame is a natural preemption point */
     static int exit_after = -1;
     if (exit_after < 0) { const char *e = getenv("DS_EXIT_AFTER_FRAMES"); exit_after = e ? atoi(e) : 0; }

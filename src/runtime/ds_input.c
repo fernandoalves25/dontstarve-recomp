@@ -12,9 +12,27 @@
 #define ERROR_DEVICE_NOT_CONNECTED 1167u
 
 static void sh_XInputEnable(void)          { RETV(1); }                               /* (BOOL) */
-static void sh_XInputGetState(void)        { RET(ERROR_DEVICE_NOT_CONNECTED, 2); }    /* (idx, XINPUT_STATE*) */
+static void sh_XInputGetState(void) {      /* (idx, XINPUT_STATE*): pad 0 is the SDL game controller */
+    uint32_t idx = A32(0), p = A32(1);
+    uint16_t b; uint8_t lt, rt; int16_t th[4];
+    if (idx != 0 || !ds_sdl_xinput(&b, &lt, &rt, th)) RET(ERROR_DEVICE_NOT_CONNECTED, 2);
+    static uint32_t packet; packet++;
+    /* XINPUT_STATE: dwPacketNumber, XINPUT_GAMEPAD { wButtons, bLeftTrigger, bRightTrigger, sThumbLX/LY/RX/RY } */
+    MEM32(p) = packet; MEM16(p + 4) = b; MEM8(p + 6) = lt; MEM8(p + 7) = rt;
+    for (int i = 0; i < 4; i++) MEM16(p + 8 + 2u * (uint32_t)i) = (uint16_t)th[i];
+    RET(0, 2);
+}
 static void sh_XInputSetState(void)        { RET(ERROR_DEVICE_NOT_CONNECTED, 2); }    /* (idx, XINPUT_VIBRATION*) */
-static void sh_XInputGetCapabilities(void) { RET(ERROR_DEVICE_NOT_CONNECTED, 3); }    /* (idx, flags, XINPUT_CAPABILITIES*) */
+static void sh_XInputGetCapabilities(void) {   /* (idx, flags, XINPUT_CAPABILITIES*) */
+    uint16_t b; uint8_t lt, rt; int16_t th[4];
+    uint32_t idx = A32(0), p = A32(2);
+    if (idx != 0 || !ds_sdl_xinput(&b, &lt, &rt, th)) RET(ERROR_DEVICE_NOT_CONNECTED, 3);
+    memset(ds_hostptr(p), 0, 20);                /* Type, SubType, Flags, Gamepad caps, Vibration */
+    MEM8(p) = 1; MEM8(p + 1) = 1;                /* XINPUT_DEVTYPE_GAMEPAD, XINPUT_DEVSUBTYPE_GAMEPAD */
+    MEM16(p + 4) = 0xF3FF; MEM8(p + 6) = 0xFF; MEM8(p + 7) = 0xFF;
+    for (int i = 0; i < 4; i++) MEM16(p + 8 + 2u * (uint32_t)i) = 0xFFC0;
+    RET(0, 3);
+}
 static void sh_XInputGetKeystroke(void)    { RET(ERROR_DEVICE_NOT_CONNECTED, 3); }    /* (idx, reserved, XINPUT_KEYSTROKE*) */
 
 /* ===================== DirectInput 8: an interface with no devices.

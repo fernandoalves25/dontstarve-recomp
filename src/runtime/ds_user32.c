@@ -357,10 +357,18 @@ static void sh_MapVirtualKeyA(void) {        /* (uCode, uMapType) */
 #define WM_LBUTTONDOWN 0x0201u
 #define WM_LBUTTONUP   0x0202u
 typedef struct { uint32_t frame, msg, wp, lp; } qmsg;
-#define MAX_Q 256
-static qmsg g_q[MAX_Q]; static int g_q_n, g_q_head, g_q_loaded;
+/* scripted input (DS_INPUT), in frame order */
+#define MAX_SCRIPT 256
+static qmsg g_script[MAX_SCRIPT]; static int g_script_n, g_script_next, g_q_loaded;
+/* the queue PeekMessage reads: a ring of posted messages */
+#define QRING 1024
+static qmsg g_ring[QRING]; static uint32_t g_ring_head, g_ring_tail;
+static void post(uint32_t msg, uint32_t wp, uint32_t lp) {
+    if (g_ring_tail - g_ring_head >= QRING) return;          /* full: drop */
+    qmsg *q = &g_ring[g_ring_tail++ % QRING]; q->frame = 0; q->msg = msg; q->wp = wp; q->lp = lp;
+}
 static void q_push(uint32_t frame, uint32_t msg, uint32_t wp, uint32_t lp) {
-    if (g_q_n < MAX_Q) { g_q[g_q_n].frame = frame; g_q[g_q_n].msg = msg; g_q[g_q_n].wp = wp; g_q[g_q_n].lp = lp; g_q_n++; }
+    if (g_script_n < MAX_SCRIPT) { qmsg *q = &g_script[g_script_n++]; q->frame = frame; q->msg = msg; q->wp = wp; q->lp = lp; }
 }
 static void q_load(void) {
     g_q_loaded = 1;
@@ -384,22 +392,25 @@ static void q_load(void) {
         while (*e && *e != ';') e++;
         if (*e == ';') e++;
     }
-    if (g_q_n) fprintf(stderr, "[user32] DS_INPUT: %d scripted messages\n", g_q_n);
+    if (g_script_n) fprintf(stderr, "[user32] DS_INPUT: %d scripted messages\n", g_script_n);
 }
 static void sh_PeekMessageA(void) {          /* (MSG*, hwnd, min, max, wRemoveMsg) */
     if (!g_q_loaded) q_load();
     uint32_t m = A32(0), remove = A32(4) & 1;
-    if (g_q_head < g_q_n && ds_frame_count() >= g_q[g_q_head].frame && g_wnd_n) {
-        qmsg *q = &g_q[g_q_head];
-        if (q->msg >= WM_MOUSEMOVE) { g_cur_x = (int32_t)(q->lp & 0xFFFF); g_cur_y = (int32_t)(q->lp >> 16); }
+    if (ds_sdl_active()) ds_sdl_pump(post);    /* the real screen and buttons */
+    while (g_script_next < g_script_n && ds_frame_count() >= g_script[g_script_next].frame) {
+        qmsg *q = &g_script[g_script_next++];
+        fprintf(stderr, "[user32] input msg 0x%04X (%08X, %08X) at frame %u\n", q->msg, q->wp, q->lp, ds_frame_count());
+        post(q->msg, q->wp, q->lp);
+    }
+    if (g_ring_head != g_ring_tail && g_wnd_n) {
+        qmsg *q = &g_ring[g_ring_head % QRING];
+        if (q->msg >= WM_MOUSEMOVE && q->msg <= 0x020Au) { g_cur_x = (int32_t)(q->lp & 0xFFFF); g_cur_y = (int32_t)(q->lp >> 16); }
         if (m) {                             /* MSG: hwnd, message, wParam, lParam, time, pt.x, pt.y */
             MEM32(m) = g_wnd[0].hwnd; MEM32(m + 4) = q->msg; MEM32(m + 8) = q->wp; MEM32(m + 12) = q->lp;
             MEM32(m + 16) = 0; MEM32(m + 20) = (uint32_t)g_cur_x; MEM32(m + 24) = (uint32_t)g_cur_y;
         }
-        if (remove) {
-            fprintf(stderr, "[user32] input msg 0x%04X (%08X, %08X) at frame %u\n", q->msg, q->wp, q->lp, ds_frame_count());
-            g_q_head++;
-        }
+        if (remove) g_ring_head++;
         RET(1, 5);
     }
     RET(0, 5);
