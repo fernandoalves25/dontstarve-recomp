@@ -106,8 +106,8 @@ void recomp_trace_enter(uint32_t va) {
     if (g_cov_n < COV_CAP / 2) { g_cov[h] = va; g_cov_n++; }
 }
 static void cov_dump(void) {
-    const char *m = getenv("DS_COV_MERGE");                /* =1: union with the file's earlier runs */
-    FILE *in = m && *m == '1' ? fopen("build/executed_vas.txt", "r") : NULL;
+    const char *m = getenv("DS_COV_MERGE");                /* union with earlier runs; =0: this run only */
+    FILE *in = !(m && *m == '0') ? fopen("build/executed_vas.txt", "r") : NULL;
     if (in) {
         unsigned va;
         while (fscanf(in, "%x", &va) == 1 && va && g_cov_n < COV_CAP / 2) {

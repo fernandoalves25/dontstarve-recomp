@@ -131,7 +131,9 @@ What's in the runtime now ([src/runtime](src/runtime)):
   the frames come out the same).
 - **SDL2** ([ds_sdl.c](src/runtime/ds_sdl.c), `DS_VIDEO=sdl`): window + GLES2 context, events into
   the message queue, the SDL game controller as XInput pad 0. **Input** ([ds_input.c](src/runtime/ds_input.c)).
-  `DS_INPUT="F click X Y; F key VK"` scripts a headless run.
+  `DS_INPUT="F click X Y; F key VK"` scripts a headless run; `DS_PAD="F buttons HEX N; F stick LX LY N"`
+  scripts a pad: the game shows "Controller Detected", the d-pad moves focus, A enables the
+  controller and the menus switch to pad prompts.
 - **Threads** ([ds_thread.c](src/runtime/ds_thread.c)): real threads under one machine lock, with
   preemption points (loop back-edges, every frame) so the world generator runs beside the renderer.
 - **Guest heap** (kernel32): size-class free lists, so loading and unloading worlds recycles memory;
@@ -335,7 +337,9 @@ O que já existe no runtime ([src/runtime](src/runtime)):
   frames saem iguais).
 - **SDL2** ([ds_sdl.c](src/runtime/ds_sdl.c), `DS_VIDEO=sdl`): janela + contexto GLES2, eventos na
   fila de mensagens, o controle SDL como pad XInput 0. **Input** ([ds_input.c](src/runtime/ds_input.c)).
-  `DS_INPUT="F click X Y; F key VK"` roteiriza uma execução headless.
+  `DS_INPUT="F click X Y; F key VK"` roteiriza uma execução headless; `DS_PAD="F buttons HEX N; F stick LX LY N"`
+  roteiriza um controle: o jogo mostra "Controller Detected", o d-pad move o foco, o A habilita o
+  controle e os menus passam a mostrar os botões do controle.
 - **Threads** ([ds_thread.c](src/runtime/ds_thread.c)): threads reais sob uma trava da máquina, com
   pontos de preempção (voltas de laço, cada frame), para o gerador de mundo rodar ao lado do render.
 - **Heap do guest** (kernel32): listas livres por classe de tamanho, então carregar e descarregar
