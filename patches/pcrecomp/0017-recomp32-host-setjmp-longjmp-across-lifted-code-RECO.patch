@@ -1,0 +1,111 @@
+From 0768bf87dfeeae36549fb316ac83fb9e74ff6b98 Mon Sep 17 00:00:00 2001
+From: Fernando Alves <67828493+fernandoalves25@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 18:18:56 +0000
+Subject: [PATCH] recomp32: host setjmp/longjmp across lifted code
+ (RECOMP_HOST_SETJMP), setjmp thunk calls
+
+A guest longjmp returned through the RECOMP_RETADDR sentinel as if longjmp
+had returned, never unwinding the host C frames between it and its setjmp
+(Lua pcall/error). With RECOMP_HOST_SETJMP a call to the CRT's setjmp runs the
+host setjmp in the lifted caller's frame (RECOMP_SETJMP), and the host's
+longjmp jumps back to it. lift32 takes a setjmp_calls set: a direct call to a
+thunk for _setjmp/_setjmp3 is emitted as RECOMP_SETJMP_CALL.
+---
+ runtime/recomp32/recomp_types.h | 40 +++++++++++++++++++++++++++++++++
+ tools/lift/lift32.py            |  9 +++++++-
+ 2 files changed, 48 insertions(+), 1 deletion(-)
+
+diff --git a/runtime/recomp32/recomp_types.h b/runtime/recomp32/recomp_types.h
+index af42a7b..a2a0ea5 100644
+--- a/runtime/recomp32/recomp_types.h
++++ b/runtime/recomp32/recomp_types.h
+@@ -1077,6 +1077,45 @@ void recomp_unresolved(const char *kind, uint32_t va, uint32_t from);
+     fprintf(stderr, "%s: unresolved VA 0x%08X from 0x%08X\n", (kind), (va), g_cur_func)
+ #endif
+ 
++/* setjmp/longjmp across lifted code (RECOMP_HOST_SETJMP).
++ *
++ * A guest longjmp restores the guest registers and "returns" through the saved
++ * return address -- which in this model is the RECOMP_RETADDR sentinel, so
++ * RECOMP_ITAIL took it for an ordinary return from longjmp itself. The host C
++ * frames between the setjmp and the longjmp were never unwound, and code after
++ * the longjmp ran as if it had returned: Lua's luaD_throw (pcall/error) fell
++ * through into its "no handler" path.
++ *
++ * With RECOMP_HOST_SETJMP the host provides real non-local jumps. A call to
++ * the CRT's _setjmp/_setjmp3 (recomp_is_setjmp) is not a call at all:
++ * RECOMP_SETJMP runs the host setjmp right here, in the lifted caller's own C
++ * frame, and saves the guest callee-saved registers. The host's longjmp
++ * override jumps back into that frame; the second return restores the
++ * registers and hands back the longjmp value in eax. The guest jmp_buf only
++ * keys the host record. esp is left as at the call: the setjmps are cdecl and
++ * their caller pops its own arguments. */
++#ifdef RECOMP_HOST_SETJMP
++#include <setjmp.h>
++typedef struct { uint32_t esp, ebp, ebx, esi, edi, val; int depth; jmp_buf host; } recomp_jmp_t;
++recomp_jmp_t *recomp_jmp_slot(uint32_t guest_jmp_buf);   /* host-provided, keyed by guest VA */
++int recomp_is_setjmp(uint32_t va);                        /* host-provided */
++int recomp_jmp_depth(void);                               /* host: machine-lock depth to restore */
++#define RECOMP_SETJMP() do { \
++    recomp_jmp_t *_jb = recomp_jmp_slot(MEM32(esp)); \
++    _jb->esp = esp; _jb->ebp = ebp; _jb->ebx = ebx; _jb->esi = esi; _jb->edi = edi; \
++    _jb->depth = recomp_jmp_depth(); \
++    uint32_t _caller_sj = g_cur_func; \
++    if (setjmp(_jb->host) == 0) { eax = 0; } \
++    else { esp = _jb->esp; ebp = _jb->ebp; ebx = _jb->ebx; esi = _jb->esi; edi = _jb->edi; \
++           eax = _jb->val; g_cur_func = _caller_sj; } \
++} while (0)
++#define RECOMP_SETJMP_TRY(va) if (recomp_is_setjmp(va)) { RECOMP_SETJMP(); } else
++#define RECOMP_SETJMP_CALL(func) RECOMP_SETJMP()
++#else
++#define RECOMP_SETJMP_TRY(va)
++#define RECOMP_SETJMP_CALL(func) RECOMP_CALL(func)
++#endif
++
+ /* Direct call to a known recompiled function */
+ #define RECOMP_CALL(func) do { \
+     uint32_t _caller = g_cur_func; \
+@@ -1098,6 +1137,7 @@ void recomp_unresolved(const char *kind, uint32_t va, uint32_t from);
+     recomp_func_t _fn = recomp_lookup_manual(_va); \
+     if (!_fn) _fn = recomp_lookup(_va); \
+     if (!_fn) _fn = recomp_lookup_import(_va); \
++    RECOMP_SETJMP_TRY(_va) \
+     if (_fn) { \
+         uint32_t _caller = g_cur_func; \
+         PUSH32(esp, RECOMP_RETADDR); \
+diff --git a/tools/lift/lift32.py b/tools/lift/lift32.py
+index 3a9768c..d0f864a 100644
+--- a/tools/lift/lift32.py
++++ b/tools/lift/lift32.py
+@@ -235,13 +235,18 @@ class Lifter:
+     def __init__(self, iat_map: dict = None, func_names: dict = None,
+                  lifted: set = None, precise_sbb: bool = False,
+                  patch_sites: set = None, precise_carry: bool = False,
+-                 reloc=None, hook_sites: set = None):
++                 reloc=None, hook_sites: set = None, setjmp_calls: set = None):
+         """
+         iat_map: VA -> (dll, func_name) for import resolution
+         func_names: VA -> name for known function names
+         """
+         self.iat_map = iat_map or {}
+         self.func_names = func_names or {}
++        # Thunks to the CRT's setjmp (`jmp [__imp__setjmp3]`). A call to one is
++        # emitted as RECOMP_SETJMP_CALL: with RECOMP_HOST_SETJMP the host setjmp
++        # has to run in THIS function's C frame, not in the thunk's, which
++        # returns at once (see recomp_types.h).
++        self.setjmp_calls = setjmp_calls or set()
+         # VAs that will actually be emitted. Direct calls to anything else
+         # (garbage targets from data decoded as code) degrade to RECOMP_ICALL,
+         # which logs at runtime instead of failing the link on a symbol nobody
+@@ -1483,6 +1488,8 @@ class Lifter:
+                     lines.append(f"RECOMP_CALL(recomp_{self.func_names[target]}); {comment}")
+                 elif self.lifted is not None and target not in self.lifted:
+                     lines.append(f"RECOMP_ICALL(0x{target:08X}u); {comment} /* not lifted */")
++                elif target in self.setjmp_calls:
++                    lines.append(f"RECOMP_SETJMP_CALL(sub_{target:08X}); {comment} /* setjmp thunk */")
+                 else:
+                     lines.append(f"RECOMP_CALL(sub_{target:08X}); {comment}")
+             else:
+-- 
+2.43.0
+

@@ -316,9 +316,13 @@ static uint32_t find_first(const char *gpat, uint32_t out, int wide) {
         if (f->d) closedir(f->d);
         free(f);
         ds_set_last_error(ERROR_FILE_NOT_FOUND);
+        if (trace_on()) fprintf(stderr, "[file]   -> no match\n");
         return INVALID_HANDLE;
     }
-    return ds_handle_new(HK_FIND, f);
+    uint32_t h = ds_handle_new(HK_FIND, f);
+    if (trace_on()) fprintf(stderr, "[file]   -> handle %u (%s), first \"%s\"\n", h, wide ? "W" : "A",
+                            wide ? "(wide)" : (const char *)ds_hostptr(out + 44));
+    return h;
 }
 static void sh_FindFirstFileA(void) { RET(find_first(ASTR(0), A32(1), 0), 2); }
 static void sh_FindFirstFileW(void) { char p[520]; guest_w_to_a(A32(0), p, sizeof p); RET(find_first(p, A32(1), 1), 2); }

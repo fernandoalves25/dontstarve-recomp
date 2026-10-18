@@ -1,3 +1,6 @@
 # DS overrides (VA<space>note per line). Empty for now; filled iteratively.
 7857df6c  __EH_prolog (native HLE)
 7858cf00  _SEH_prolog4 (native HLE)
+7855ae20  memcpy (native: the VC9 asm dispatches its tail through jump tables the lifter cannot follow)
+7855b310  memmove (native, same reason)
+785947d8  longjmp (native: host longjmp back into the lifted setjmp frame, RECOMP_HOST_SETJMP)

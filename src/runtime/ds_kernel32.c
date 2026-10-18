@@ -468,7 +468,26 @@ static void sh_GetTimeZoneInformation(void) {      /* TIME_ZONE_INFORMATION (172
     memset(ds_hostptr(A32(0)), 0, 172);
     RET(0, 1);                                     /* TIME_ZONE_ID_UNKNOWN */
 }
+/* FILETIME (100 ns since 1601) <-> SYSTEMTIME; local time is UTC (see GetTimeZoneInformation) */
+static void sh_FileTimeToLocalFileTime(void) {     /* (const FILETIME *, FILETIME *) */
+    MEM32(A32(1)) = MEM32(A32(0)); MEM32(A32(1) + 4) = MEM32(A32(0) + 4);
+    RET(1, 2);
+}
+static void sh_FileTimeToSystemTime(void) {        /* (const FILETIME *, SYSTEMTIME *: 8 WORDs) */
+    uint64_t ft = ((uint64_t)MEM32(A32(0) + 4) << 32) | MEM32(A32(0));
+    time_t t = (time_t)(ft / 10000000ull) - (time_t)11644473600ll;
+    struct tm tm; gmtime_r(&t, &tm);
+    uint32_t p = A32(1);
+    MEM16(p) = (uint16_t)(tm.tm_year + 1900); MEM16(p + 2) = (uint16_t)(tm.tm_mon + 1);
+    MEM16(p + 4) = (uint16_t)tm.tm_wday; MEM16(p + 6) = (uint16_t)tm.tm_mday;
+    MEM16(p + 8) = (uint16_t)tm.tm_hour; MEM16(p + 10) = (uint16_t)tm.tm_min;
+    MEM16(p + 12) = (uint16_t)tm.tm_sec; MEM16(p + 14) = (uint16_t)((ft / 10000ull) % 1000ull);
+    RET(1, 2);
+}
 static void sh_RaiseException(void) {
+    /* MS_VC_EXCEPTION: "set this thread's name", raised for an attached
+     * debugger; without one the thread code's own __except swallows it. */
+    if (A32(0) == 0x406D1388u) RETV(4);
     ds_fatal("guest RaiseException(code 0x%08X, flags %u, nargs %u) from 0x%08X",
              A32(0), A32(1), A32(2), g_cur_func);
 }
@@ -593,6 +612,7 @@ const ds_shim ds_kernel32[] = {
     { "GetFullPathNameA", sh_GetFullPathNameA }, { "GetLongPathNameA", sh_GetLongPathNameA },
     { "ExpandEnvironmentStringsA", sh_ExpandEnvironmentStringsA }, { "RaiseException", sh_RaiseException },
     { "GetTimeZoneInformation", sh_GetTimeZoneInformation },
+    { "FileTimeToLocalFileTime", sh_FileTimeToLocalFileTime }, { "FileTimeToSystemTime", sh_FileTimeToSystemTime },
     { 0, 0 }
 };
 
@@ -605,4 +625,5 @@ void ds_host_init(void) {
     ds_register(ds_thread);
     ds_register(ds_gles);
     ds_register(ds_input);
+    ds_register(ds_fmod);
 }

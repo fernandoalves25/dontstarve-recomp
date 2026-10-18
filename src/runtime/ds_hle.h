@@ -58,6 +58,7 @@ int       ds_register(const ds_shim *shims);              /* NULL-terminated; re
 uint32_t  ds_resolve(const char *name);                   /* synthetic VA or 0 */
 uint32_t  ds_resolve_or_stub(const char *name);           /* unknown -> self-naming abort stub */
 const char *ds_hle_name(uint32_t va);                     /* name for a synthetic VA or NULL */
+uint32_t  ds_last_import_va(void);                        /* inside a shim: the VA it was called through */
 
 /* ---- machine lock + native->guest ---- */
 void      mach_enter(void);
@@ -82,6 +83,7 @@ extern const ds_shim ds_file[];     /* kernel32 file I/O (ds_file.c) */
 extern const ds_shim ds_net[];      /* offline Winsock (ds_net.c) */
 extern const ds_shim ds_thread[];   /* threads + waitable objects (ds_thread.c) */
 extern const ds_shim ds_input[];    /* XInput + DirectInput8 (ds_input.c) */
+extern const ds_shim ds_fmod[];     /* FMOD Ex + Event, silent (ds_fmod.c) */
 extern const ds_shim ds_gles[];     /* ANGLE libEGL/libGLESv2 -> host EGL/GLES2 (ds_gles.c) */
 
 #endif /* DS_HLE_H */
