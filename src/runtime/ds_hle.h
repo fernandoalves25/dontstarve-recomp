@@ -18,6 +18,7 @@
 #ifndef DS_HLE_H
 #define DS_HLE_H
 #include <stdint.h>
+#include <stddef.h>
 #include "recomp_types.h"   /* g_eax, g_esp, MEM32, ADDR, recomp_func_t, dispatch */
 
 /* ---- stdcall argument access (arena-aware) ---- */
@@ -43,6 +44,10 @@ uint32_t ds_handle_new(int kind, void *host_obj);         /* token >= 0x1 */
 void    *ds_handle_get(uint32_t token, int kind);         /* NULL if wrong kind/unknown */
 int      ds_handle_kind(uint32_t token);
 
+/* handle kinds shared by the shim modules (ds_user32.c uses 0x20 and up) */
+enum { HK_HEAP = 1, HK_MODULE, HK_FILE /* std handle */, HK_MUTEX, HK_EVENT, HK_THREAD,
+       HK_HOSTFILE, HK_FIND /* ds_file.c */ };
+
 /* ---- shim registry ---- */
 typedef struct { const char *name; recomp_func_t fn; } ds_shim;
 int       ds_register(const ds_shim *shims);              /* NULL-terminated; returns count */
@@ -53,15 +58,24 @@ const char *ds_hle_name(uint32_t va);                     /* name for a syntheti
 /* ---- machine lock + native->guest ---- */
 void      mach_enter(void);
 void      mach_leave(void);
+int       ds_block_begin(void);                           /* release the machine around a blocking call */
+void      ds_block_end(int depth);
 uint32_t  hle_call_guest(uint32_t va, int nargs, const uint32_t *args);
 
 /* ---- host services ---- */
 void      ds_fatal(const char *fmt, ...);
 extern int ds_trace;                                      /* DS_HLE_TRACE: one line per shim call */
+void      ds_set_last_error(uint32_t err);                /* kernel32 GetLastError value */
+const char *ds_cwd(void);                                 /* guest current directory (Z:\...) */
+int       ds_map_path(const char *gpath, char *host, size_t cap);   /* 1 exists, 0 leaf missing, <0 no */
+int       ds_mkdirs(const char *gpath);                   /* create every missing level; 1 if a dir now */
 
 /* each module's table (defined in its .c, registered by the host) */
 extern const ds_shim ds_kernel32[];
 extern const ds_shim ds_win32[];
 extern const ds_shim ds_user32[];   /* USER32 + GDI32 (ds_user32.c) */
+extern const ds_shim ds_file[];     /* kernel32 file I/O (ds_file.c) */
+extern const ds_shim ds_net[];      /* offline Winsock (ds_net.c) */
+extern const ds_shim ds_thread[];   /* threads + waitable objects (ds_thread.c) */
 
 #endif /* DS_HLE_H */

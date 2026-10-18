@@ -203,6 +203,23 @@ void mach_leave(void) {
     if (--g_ms.depth == 0) regs_save(&g_ms.r);
     pthread_mutex_unlock(&g_mach);
 }
+/* A shim about to block (Sleep, a wait, a contended lock) lets the other guest
+ * threads run: save this thread's registers, drop every level of the machine
+ * lock, and take it all back afterwards. The shim must read its arguments
+ * BEFORE ds_block_begin (g_esp belongs to whoever runs meanwhile) and RET
+ * only after ds_block_end. */
+int ds_block_begin(void) {
+    int d = g_ms.depth;
+    regs_save(&g_ms.r);
+    g_ms.depth = 0;
+    for (int i = 0; i < d; i++) pthread_mutex_unlock(&g_mach);
+    return d;
+}
+void ds_block_end(int d) {
+    for (int i = 0; i < d; i++) pthread_mutex_lock(&g_mach);
+    g_ms.depth = d;
+    regs_load(&g_ms.r);
+}
 
 /* ============================================================ dispatch
  * The exe and each lifted DLL (msvcr90, msvcp90) have their own dispatch table,
@@ -543,7 +560,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--trace")) ds_trace = 1;
         else if (argv[i][0] != '-') exe = argv[i];
     }
-    if (!exe) exe = "work/dontstarve_steam.exe";
+    if (!exe) exe = "work/dontstarve.exe";
     if (getenv("DS_HLE_TRACE")) ds_trace = 1;
     g_permissive = permissive;
 

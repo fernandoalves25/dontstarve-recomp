@@ -13,7 +13,7 @@ import json, os
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 STATUS = os.path.join(ROOT, "docs", "status.json")
 CATALOGS = {
-    "dontstarve_steam.exe": "work/catalog.json",
+    "dontstarve.exe": "work/catalog.json",          # the DRM-free standalone build
     "msvcr90.dll": "work/msvcr90_catalog.json",
     "msvcp90.dll": "work/msvcp90_catalog.json",
 }
