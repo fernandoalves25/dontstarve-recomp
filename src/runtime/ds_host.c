@@ -175,7 +175,41 @@ recomp_func_t recomp_lookup(uint32_t va) {
     if (msvcp90_recomp_dispatch_table && (f = table_lookup(msvcp90_recomp_dispatch_table, msvcp90_recomp_dispatch_count, va))) return f;
     return NULL;
 }
-recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return NULL; }
+/* Manual overrides: a guest VA whose lifted body is a trampoline (overrides.txt)
+ * calling recomp_lookup_manual -> our native C. Used to HLE the CRT's EH helpers,
+ * whose lifted form does raw return-address surgery incompatible with the recomp
+ * call model (the "return address" is the RECOMP_RETADDR sentinel). */
+#define MAX_MANUAL 64
+static struct { uint32_t va; recomp_func_t fn; } g_manual[MAX_MANUAL];
+static int g_manual_n;
+void ds_register_manual(uint32_t va, recomp_func_t fn) {
+    if (g_manual_n < MAX_MANUAL) { g_manual[g_manual_n].va = va; g_manual[g_manual_n].fn = fn; g_manual_n++; }
+}
+recomp_func_t recomp_lookup_manual(uint32_t va) {
+    for (int i = 0; i < g_manual_n; i++) if (g_manual[i].va == va) return g_manual[i].fn;
+    return NULL;
+}
+
+/* Native __EH_prolog (msvcr90 0x7857DF6C). Real code:
+ *   push -1; push eax(scopetable); push fs:[0]; mov eax,[esp+0xC](=retaddr);
+ *   mov fs:[0],esp; mov [esp+0xC],ebp; lea ebp,[esp+0xC]; push eax; ret
+ * i.e. it repurposes the return-addr slot as the saved-ebp slot and returns via
+ * push/ret. Here the recomp call wrapper handles the return, so we only build the
+ * equivalent frame + SEH record, never treating the sentinel as a real address.
+ * On entry g_esp points at the (sentinel) return-addr slot P, g_eax = scopetable. */
+static void ds_eh_prolog(void) {
+    uint32_t P = g_esp;
+    uint32_t scopetable = g_eax;
+    uint32_t old_fs0 = MEM32(g_fs_base + 0);
+    MEM32(P)      = g_ebp;        /* retaddr slot -> saved ebp */
+    MEM32(P - 4)  = 0xFFFFFFFFu;  /* try level = -1 */
+    MEM32(P - 8)  = scopetable;   /* scopetable */
+    MEM32(P - 12) = old_fs0;      /* EXCEPTION_REGISTRATION.Next */
+    MEM32(g_fs_base + 0) = P - 12;/* fs:[0] = &record */
+    g_ebp = P;
+    g_esp = P - 12;
+    g_eax = 0;
+}
 
 /* ============================================================ shim registry */
 #define SHIM_BASE 0x7F000000u
@@ -433,6 +467,7 @@ int main(int argc, char **argv) {
     int have_p = (ds_pe_load("work/msvcp90.dll", &img_p) == 0); if (have_p) g_msvcp_img = &img_p;
 
     ds_host_init();
+    ds_register_manual(0x7857DF6Cu, ds_eh_prolog);   /* msvcr90 __EH_prolog */
     fprintf(stderr, "[ds] registered %d HLE shims; lifted DLLs: msvcr90=%d msvcp90=%d\n",
             g_shim_n, have_r, have_p);
 
