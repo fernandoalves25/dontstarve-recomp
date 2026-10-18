@@ -225,6 +225,116 @@ static void sh_strstr(void)  { char *s = ASTR(0); char *r = strstr(s, ASTR(1)); 
 static void sh_getenv(void)  { RET(0, 0); }   /* no environment: NULL */
 static void sh_putenv(void)  { RET(0, 0); }
 
+/* ===================== CRT-init batch: environment / codepage / locale /
+ * std handles / system info (stdcall kernel32) ===================== */
+static uint32_t g_env_block;
+static uint32_t env_block(void) { /* an empty environment: "\0\0" */
+    if (!g_env_block) { g_env_block = ds_arena_alloc(4, 2); MEM32(g_env_block) = 0; }
+    return g_env_block;
+}
+static void sh_GetEnvironmentVariableA(void) { g_last_error = 203; RET(0, 3); } /* ERROR_ENVVAR_NOT_FOUND */
+static void sh_GetEnvironmentVariableW(void) { g_last_error = 203; RET(0, 3); }
+static void sh_GetEnvironmentStrings(void)   { RET(env_block(), 0); }
+static void sh_GetEnvironmentStringsA(void)  { RET(env_block(), 0); }
+static void sh_GetEnvironmentStringsW(void)  { RET(env_block(), 0); }
+static void sh_FreeEnvironmentStringsA(void) { RET(1, 1); }
+static void sh_FreeEnvironmentStringsW(void) { RET(1, 1); }
+static void sh_SetEnvironmentVariableA(void) { RET(1, 2); }
+
+/* std handles carry their nStdHandle id in the token's obj */
+static void sh_GetStdHandle(void) { RET(ds_handle_new(HK_FILE, (void *)(intptr_t)(int32_t)A32(0)), 1); }
+static void sh_GetFileType(void)  { RET(2, 1); }              /* FILE_TYPE_CHAR */
+static void sh_SetHandleCount(void){ RET(A32(0), 1); }
+static void sh_WriteFile(void) {   /* (h, buf, n, *written, ovl) -> host stdout/stderr */
+    uint32_t h = A32(0), n = A32(2);
+    int id = (int)(intptr_t)ds_handle_get(h, HK_FILE);
+    FILE *out = (id == -12) ? stderr : stdout;
+    size_t w = fwrite(ds_hostptr(A32(1)), 1, n, out);
+    if (A32(3)) MEM32(A32(3)) = (uint32_t)w;
+    RET(1, 5);
+}
+static void sh_CloseHandle(void)  { RET(1, 1); }
+
+static void sh_GetACP(void)   { RET(1252, 0); }
+static void sh_GetOEMCP(void) { RET(437, 0); }
+static void sh_IsValidCodePage(void) { RET(1, 1); }
+static void sh_GetCPInfo(void) {   /* (cp, lpCPInfo) minimal single-byte */
+    uint32_t p = A32(1);
+    MEM32(p + 0) = 1;              /* MaxCharSize */
+    MEM8(p + 4) = '?';             /* DefaultChar[0] */
+    memset(ds_hostptr(p + 5), 0, 0x12 - 5);
+    RET(1, 2);
+}
+static void sh_GetStringTypeW(void) { RET(1, 4); }   /* best-effort: say "handled" */
+static void sh_GetStringTypeA(void) { RET(1, 5); }
+static void sh_MultiByteToWideChar(void) { /* (cp,flags,src,srclen,dst,dstlen) ASCII widen */
+    const char *src = (const char *)APTR(2); int srclen = (int)A32(3);
+    uint32_t dst = A32(4); int dstlen = (int)A32(5);
+    int n = (srclen < 0) ? (int)strlen(src) + 1 : srclen;
+    if (dstlen == 0) RET(n, 6);
+    int m = n < dstlen ? n : dstlen;
+    for (int i = 0; i < m; i++) MEM16(dst + (uint32_t)i * 2) = (uint8_t)src[i];
+    RET(m, 6);
+}
+static void sh_WideCharToMultiByte(void) { /* (cp,flags,src,srclen,dst,dstlen,def,used) ASCII narrow */
+    uint32_t src = A32(2); int srclen = (int)A32(3);
+    uint32_t dst = A32(4); int dstlen = (int)A32(5);
+    int n = 0; if (srclen < 0) { while (MEM16(src + (uint32_t)n * 2)) n++; n++; } else n = srclen;
+    if (dstlen == 0) RET(n, 8);
+    int m = n < dstlen ? n : dstlen; char *d = (char *)ds_hostptr(dst);
+    for (int i = 0; i < m; i++) d[i] = (char)MEM16(src + (uint32_t)i * 2);
+    RET(m, 8);
+}
+static void sh_LCMapStringW(void) { RET(0, 6); }
+static void sh_LCMapStringA(void) { RET(0, 6); }
+static void sh_GetLocaleInfoA(void) { RET(0, 4); }
+static void sh_GetLocaleInfoW(void) { RET(0, 4); }
+static void sh_GetThreadLocale(void) { RET(0x0409, 0); }     /* en-US */
+static void sh_SetThreadLocale(void) { RET(1, 1); }
+static void sh_GetUserDefaultLCID(void) { RET(0x0409, 0); }
+static void sh_IsValidLocale(void) { RET(1, 2); }
+static void sh_EnumSystemLocalesA(void) { RET(1, 2); }
+
+static void sh_GetModuleHandleW(void)   { RET(A32(0) ? ds_handle_new(HK_MODULE, 0) : 0x00400000u, 1); }
+static void sh_GetModuleFileNameW(void) { if (A32(2)) MEM16(A32(1)) = 0; RET(0, 3); }
+static void sh_GetStartupInfoW(void)    { uint32_t p = A32(0); memset(ds_hostptr(p), 0, 68); MEM32(p) = 68; RETV(1); }
+static void sh_GetVersionExW(void)      { uint32_t p = A32(0); MEM32(p+4)=6; MEM32(p+8)=1; MEM32(p+12)=7600; MEM32(p+16)=2; RET(1,1); }
+static void sh_GetCurrentThread(void)   { RET(0xFFFFFFFEu, 0); }
+static void sh_TerminateProcess(void)   { fprintf(stderr, "[ds] TerminateProcess\n"); exit((int)A32(1)); }
+static void sh_UnhandledExceptionFilter(void){ RET(0, 1); }  /* EXCEPTION_CONTINUE_SEARCH */
+static void sh_HeapSetInformation(void) { RET(1, 4); }
+static void sh_IsProcessorFeaturePresent(void) { /* PF_* : claim nothing exotic */
+    uint32_t f = A32(0);
+    /* 0=FP_ERRATA,1=FP_EMULATED? report MMX/SSE/SSE2 present (10,6,? ) conservatively 0 */
+    (void)f; RET(0, 1);
+}
+static void sh_GetSystemInfo(void) {   /* fill SYSTEM_INFO (minimal) */
+    uint32_t p = A32(0);
+    memset(ds_hostptr(p), 0, 36);
+    MEM32(p + 4)  = 0x1000;        /* dwPageSize */
+    MEM32(p + 20) = 4;             /* dwNumberOfProcessors */
+    MEM32(p + 28) = 0x1000;        /* dwAllocationGranularity (approx) */
+    RETV(1);
+}
+static void sh_FlsAlloc(void)    { RET(g_tls_n < NTLS ? (uint32_t)g_tls_n++ : 0xFFFFFFFFu, 1); }
+static void sh_FlsSetValue(void) { uint32_t i = A32(0); if (i < NTLS) g_tls[i] = A32(1); RET(1, 2); }
+static void sh_FlsGetValue(void) { uint32_t i = A32(0); RET(i < NTLS ? g_tls[i] : 0, 1); }
+static void sh_FlsFree(void)     { RET(1, 1); }
+static void sh_Sleep(void)       { RETV(1); }
+static void sh_RtlUnwind(void)   { RETV(4); }   /* SEH unwind: no-op for now */
+static uint32_t g_cmdlineW;
+static void sh_GetCommandLineW(void) {
+    if (!g_cmdlineW) {
+        const char *s = "dontstarve.exe";
+        uint32_t n = (uint32_t)strlen(s);
+        g_cmdlineW = ds_arena_alloc((n + 1) * 2, 2);
+        for (uint32_t i = 0; i <= n; i++) MEM16(g_cmdlineW + i * 2) = (uint8_t)s[i];
+    }
+    RET(g_cmdlineW, 0);
+}
+static void sh_GetModuleHandleExW(void) { if (A32(2)) MEM32(A32(2)) = 0x00400000u; RET(1, 3); }
+static void sh_GetProcessAffinityMask(void) { if (A32(1)) MEM32(A32(1)) = 0xF; if (A32(2)) MEM32(A32(2)) = 0xF; RET(1, 3); }
+
 const ds_shim ds_kernel32[] = {
     { "GetCommandLineA", sh_GetCommandLineA },
     { "GetModuleHandleA", sh_GetModuleHandleA },
@@ -304,6 +414,39 @@ const ds_shim ds_kernel32[] = {
     { "strcpy", sh_strcpy }, { "strncpy", sh_strncpy }, { "strcat", sh_strcat },
     { "strchr", sh_strchr }, { "strrchr", sh_strrchr }, { "strstr", sh_strstr },
     { "getenv", sh_getenv }, { "_putenv", sh_putenv },
+    /* CRT-init kernel32 batch */
+    { "GetEnvironmentVariableA", sh_GetEnvironmentVariableA },
+    { "GetEnvironmentVariableW", sh_GetEnvironmentVariableW },
+    { "GetEnvironmentStrings", sh_GetEnvironmentStrings },
+    { "GetEnvironmentStringsA", sh_GetEnvironmentStringsA },
+    { "GetEnvironmentStringsW", sh_GetEnvironmentStringsW },
+    { "FreeEnvironmentStringsA", sh_FreeEnvironmentStringsA },
+    { "FreeEnvironmentStringsW", sh_FreeEnvironmentStringsW },
+    { "SetEnvironmentVariableA", sh_SetEnvironmentVariableA },
+    { "GetStdHandle", sh_GetStdHandle }, { "GetFileType", sh_GetFileType },
+    { "SetHandleCount", sh_SetHandleCount }, { "WriteFile", sh_WriteFile },
+    { "CloseHandle", sh_CloseHandle },
+    { "GetACP", sh_GetACP }, { "GetOEMCP", sh_GetOEMCP },
+    { "IsValidCodePage", sh_IsValidCodePage }, { "GetCPInfo", sh_GetCPInfo },
+    { "GetStringTypeW", sh_GetStringTypeW }, { "GetStringTypeA", sh_GetStringTypeA },
+    { "MultiByteToWideChar", sh_MultiByteToWideChar }, { "WideCharToMultiByte", sh_WideCharToMultiByte },
+    { "LCMapStringW", sh_LCMapStringW }, { "LCMapStringA", sh_LCMapStringA },
+    { "GetLocaleInfoA", sh_GetLocaleInfoA }, { "GetLocaleInfoW", sh_GetLocaleInfoW },
+    { "GetThreadLocale", sh_GetThreadLocale }, { "SetThreadLocale", sh_SetThreadLocale },
+    { "GetUserDefaultLCID", sh_GetUserDefaultLCID }, { "IsValidLocale", sh_IsValidLocale },
+    { "EnumSystemLocalesA", sh_EnumSystemLocalesA },
+    { "GetModuleHandleW", sh_GetModuleHandleW }, { "GetModuleFileNameW", sh_GetModuleFileNameW },
+    { "GetStartupInfoW", sh_GetStartupInfoW }, { "GetVersionExW", sh_GetVersionExW },
+    { "GetCurrentThread", sh_GetCurrentThread }, { "TerminateProcess", sh_TerminateProcess },
+    { "UnhandledExceptionFilter", sh_UnhandledExceptionFilter },
+    { "HeapSetInformation", sh_HeapSetInformation },
+    { "IsProcessorFeaturePresent", sh_IsProcessorFeaturePresent },
+    { "GetSystemInfo", sh_GetSystemInfo },
+    { "FlsAlloc", sh_FlsAlloc }, { "FlsSetValue", sh_FlsSetValue },
+    { "FlsGetValue", sh_FlsGetValue }, { "FlsFree", sh_FlsFree },
+    { "Sleep", sh_Sleep }, { "RtlUnwind", sh_RtlUnwind },
+    { "GetCommandLineW", sh_GetCommandLineW }, { "GetModuleHandleExW", sh_GetModuleHandleExW },
+    { "GetProcessAffinityMask", sh_GetProcessAffinityMask },
     { 0, 0 }
 };
 

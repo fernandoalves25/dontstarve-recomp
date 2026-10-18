@@ -15,6 +15,7 @@
 #include <string.h>
 #include <strings.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/mman.h>
 #include "ds_hle.h"
 #include "pe_format.h"
@@ -368,6 +369,37 @@ static uint32_t resolve_import(const char *dll, const char *name) {
     return g_permissive ? ds_resolve_or_stub(name) : ds_resolve(name);
 }
 
+/* ============================================================ crash handler
+ * Portable: prints the last lifted function entered (g_cur_func, set by
+ * RECOMP_ENTER), the fault address as a guest VA, and the recent indirect-call
+ * trace. The single most useful thing during bring-up. */
+static void crash_handler(int sig, siginfo_t *si, void *uc) {
+    (void)uc;
+    uintptr_t fa = (uintptr_t)si->si_addr;
+    fprintf(stderr, "\n[ds] *** signal %d at fault addr %p ***\n", sig, si->si_addr);
+    fprintf(stderr, "[ds] g_cur_func = 0x%08X  (last lifted function entered)\n", g_cur_func);
+    if (fa >= (uintptr_t)g_mem_base && fa < (uintptr_t)g_mem_base + ARENA_SIZE)
+        fprintf(stderr, "[ds] fault is guest VA 0x%08X\n", (uint32_t)(fa - (uintptr_t)g_mem_base));
+    else
+        fprintf(stderr, "[ds] fault is a HOST address (not in the guest arena)\n");
+    fprintf(stderr, "[ds] arena base host %p\n", (void *)(uintptr_t)g_mem_base);
+    fprintf(stderr, "[ds] recent indirect calls (newest last):\n");
+    for (int i = 0; i < 8; i++) {
+        uint32_t idx = (g_icall_trace_idx - 8 + (uint32_t)i) & (ICALL_TRACE_SIZE - 1);
+        uint32_t t = g_icall_trace[idx];
+        if (t) {
+            const char *nm = ds_hle_name(t);
+            fprintf(stderr, "    0x%08X %-24s from 0x%08X\n", t, nm ? nm : "", g_icall_from[idx]);
+        }
+    }
+    _exit(139);
+}
+static void install_crash_handler(void) {
+    struct sigaction sa; memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = crash_handler; sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL); sigaction(SIGBUS, &sa, NULL); sigaction(SIGFPE, &sa, NULL);
+}
+
 /* ============================================================ main */
 extern void ds_host_init(void);   /* registers HLE shim modules (ds_kernel32.c) */
 
@@ -391,6 +423,7 @@ int main(int argc, char **argv) {
     g_permissive = permissive;
 
     fprintf(stderr, "=== Don't Starve recompiled - arena host (64-bit) ===\n");
+    install_crash_handler();
     if (!arena_init()) return 1;
 
     /* Map the exe and the lifted CRT DLLs into the arena at their ImageBases. */

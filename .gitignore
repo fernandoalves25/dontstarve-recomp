@@ -27,3 +27,6 @@ catalog*.json
 __pycache__/
 *.pyc
 .DS_Store
+
+# auto-generated data-as-code exclude list (regenerate with find_data_funcs.py)
+/config/exclude.txt
