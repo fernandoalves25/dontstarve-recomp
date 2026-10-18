@@ -88,7 +88,7 @@ const T = {
   title:"Don't Starve — Native ARM64 recompilation for R36S",
   sub:"Static recompilation of the Windows EXE (x86-32) into native C99 via pcrecomp — no box64, no runtime emulation. Keeps all DLCs, mods, the PT-BR translation and the PC UI.",
   bRan:"Executed at runtime", bFns:"Functions lifted", bFail:"Lift failures", bImp:"Imports resolved", bPhase:"Phase",
-  phase:"Main menu renders; gameplay next",
+  phase:"In a world; R36S build next",
   hLift:"How much actually runs — by module",
   lgLift:"ran at runtime", lgPrune:"lifted, not run yet", lgCell:"each cell ≈ 16 functions — lifting is the easy part; running is the real progress",
   fns:"fns", pruned:"pruned",
@@ -106,14 +106,14 @@ const T = {
    ["Audio (FMOD Ex shim)","FSB5/Vorbis banks"],
    ["PortMaster package + FPS","vs the ~20–22 FPS box64 ceiling"]],
   hHelp:"Where the community can help",
-  help:"<b>Milestone M6: the main menu runs natively.</b> The recompiled <code>dontstarve.exe</code> (DRM-free standalone build, 16,146 functions, 0 lift failures) boots, brings up EGL + GLES2 and silent FMOD, runs its Lua scripts and sits in its main loop drawing the main menu at 640×480 (about 50 fps on Mesa's software renderer, headless x86-64). 3,370 functions executed (2,745 in the game exe). Recent walls: the FMOD Event virtual interfaces (vtables read from the game's own fmod_event.dll), real setjmp/longjmp for Lua's pcall (pcrecomp patch 0017), shader #extension placement, and a FindNextFileA buffer overrun in our own file layer.<br><br>Help wanted: the SDL2/KMSDRM backend for the R36S (window, Mali EGL surface, buttons), the aarch64 build (glibc ≤ 2.30) with FPS against box64, and FMOD with real sound.",
+  help:"<b>Into a world.</b> The recompiled <code>dontstarve.exe</code> (DRM-free standalone build, 16,146 functions, 0 lift failures) boots, draws its main menu at 640×480 and, driven by scripted clicks, generates a new world on its WorldSim thread, loads it and simulates it with the player, the HUD and the creatures: 4,795 functions executed. Recent pieces: a real guest heap, preemption points so the world generator runs beside the renderer, the SDL2 backend (window, GLES2 context, game pad as XInput) and an aarch64 cross-build.<br><br>Help wanted: running it on a real R36S (SDL2 over KMSDRM on the Mali GPU, a glibc ≤ 2.30 build for ArkOS, FPS against box64), long play sessions, and FMOD with real sound.",
   legal:"<b>Legal:</b> this repository contains only original tooling and runtime — <b>no game binaries, assets or code</b>. You need your own legal copy of Don't Starve. Lifted C and all game material stay local (git-ignored). Don't Starve © Klei Entertainment; not affiliated with Klei. · Tooling under the MIT license."
  },
  pt:{
   title:"Don't Starve — Recompilação nativa ARM64 para R36S",
   sub:"Recompilação estática do EXE Windows (x86-32) para C99 nativo via pcrecomp — sem box64, sem emulação em runtime. Preserva todas as DLCs, mods, a tradução PT-BR e a UI de PC.",
   bRan:"Executadas em runtime", bFns:"Funções liftadas", bFail:"Falhas de lift", bImp:"Imports resolvidos", bPhase:"Fase",
-  phase:"Menu renderiza; gameplay a seguir",
+  phase:"Num mundo; build R36S a seguir",
   hLift:"Quanto realmente roda — por módulo",
   lgLift:"rodou em runtime", lgPrune:"liftada, ainda não rodou", lgCell:"cada célula ≈ 16 funções — liftar é a parte fácil; rodar é o progresso real",
   fns:"fns", pruned:"podadas",
@@ -131,7 +131,7 @@ const T = {
    ["Áudio (shim do FMOD Ex)","banks FSB5/Vorbis"],
    ["Pacote PortMaster + FPS","vs o teto de ~20–22 FPS do box64"]],
   hHelp:"Onde a comunidade pode ajudar",
-  help:"<b>Marco M6: o menu principal roda nativo.</b> O <code>dontstarve.exe</code> recompilado (build standalone DRM-free, 16.146 funções, 0 falhas de lift) inicializa, sobe EGL + GLES2 e o FMOD mudo, roda os scripts Lua e fica no loop principal desenhando o menu principal em 640×480 (cerca de 50 fps no renderizador por software do Mesa, x86-64 headless). 3.370 funções executadas (2.745 no exe do jogo). Paredes recentes: as interfaces virtuais do FMOD Event (vtables lidas do fmod_event.dll do próprio jogo), setjmp/longjmp de verdade para o pcall do Lua (patch 0017 do pcrecomp), a posição do #extension nos shaders, e um estouro de buffer no FindNextFileA da nossa própria camada de arquivos.<br><br>Procura-se ajuda: o backend SDL2/KMSDRM para o R36S (janela, superfície EGL na Mali, botões), o build aarch64 (glibc ≤ 2.30) com FPS comparado ao box64, e o FMOD com som de verdade.",
+  help:"<b>Dentro de um mundo.</b> O <code>dontstarve.exe</code> recompilado (build standalone DRM-free, 16.146 funções, 0 falhas de lift) inicializa, desenha o menu principal em 640×480 e, com cliques roteirizados, gera um mundo novo na thread WorldSim, carrega e simula esse mundo com o jogador, o HUD e as criaturas: 4.795 funções executadas. Peças recentes: um heap de verdade para o guest, pontos de preempção para o gerador de mundo rodar ao lado do render, o backend SDL2 (janela, contexto GLES2, controle como XInput) e um build cruzado aarch64.<br><br>Procura-se ajuda: rodar num R36S de verdade (SDL2 sobre KMSDRM na GPU Mali, um build com glibc ≤ 2.30 para o ArkOS, FPS comparado ao box64), sessões longas de jogo, e o FMOD com som de verdade.",
   legal:"<b>Legal:</b> este repositório contém apenas ferramentas e runtime originais — <b>nenhum binário, asset ou código do jogo</b>. Você precisa da sua própria cópia legítima de Don't Starve. O C liftado e todo material do jogo ficam locais (fora do git). Don't Starve © Klei Entertainment; sem afiliação com a Klei. · Ferramentas sob licença MIT."
  }
 };

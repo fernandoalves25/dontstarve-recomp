@@ -43,8 +43,8 @@ and the PC UI.
 **How much of the game actually runs.** Every function is already *lifted* to C — that's the
 easy part. What matters is how many have **executed** natively without crashing. Each cell ≈ 16
 functions: **bright = ran at runtime**, dim = lifted but never reached yet. Today execution runs
-through the CRT startup and the game's own init, runs the game's Lua scripts and **draws the main menu**
-(Play / Mods / Options / Exit) at 640×480, in the main loop. The map
+through the CRT startup and the game's own init, runs the game's Lua scripts, **draws the main menu**, generates
+a new world and **plays in it** (the character, HUD and creatures), at 640×480. The map
 fills in as the port progresses (measured with a `COVERAGE=1` build, see `scripts/coverage_counts.py`).
 
 ![progress map](docs/progress-en.svg)
@@ -60,11 +60,19 @@ fills in as the port progresses (measured with a `COVERAGE=1` build, see `script
 | M4 Arena host, IAT binding (955/955), CRT `DllMain` runs | ✅ done |
 | M5 CRT initialization — both CRT `DllMain`s + exe CRT startup, game `main()` runs | ✅ done |
 | M6 Native main menu — the recompiled game draws its menu (headless x86-64 + Mesa) | ✅ done |
-| **M7 Stability** | 🟡 **in progress — into a world: input, then the simulation** |
+| **M7 Stability** | 🟡 **in progress — a new world generates, loads and simulates; long play sessions next** |
 | M8 Audio (FMOD Ex shim) | ⬜ |
 | M9 PortMaster package + FPS vs box64 | ⬜ |
 
 ### 🙋 Where help is needed
+
+**Milestones M6 + into a world.** Scripted clicks (`DS_INPUT`) take a headless run through
+Play → New Game → Start: the `WorldSim` thread generates the world (voronoi map, tile map, roads,
+"Generation complete"), the game loads it and simulates it with the player, the HUD and the
+creatures — **4,795 functions executed**. The **SDL2 backend** (`DS_VIDEO=sdl`) draws the same
+frames in an SDL window with an SDL game controller as XInput pad 0. The **aarch64**
+cross-build ([scripts/build_arm64.sh](scripts/build_arm64.sh)) and a PortMaster launcher
+([port/dontstarve.sh](port/dontstarve.sh)) are in progress.
 
 **Milestone M6: the main menu runs natively.** The recompiled `dontstarve.exe` (the DRM-free
 standalone build; 16,146 functions, 0 lift failures) boots through the CRT, creates its window,
@@ -89,8 +97,13 @@ What's in the runtime now ([src/runtime](src/runtime)):
 - **File I/O** ([ds_file.c](src/runtime/ds_file.c)): `Z:\dontstarve\…` → `$DS_GAME_DIR` (default
   `gamedata/`: your install's `bin/`, `data/`, `mods/`), `Z:\home\…` → `$DS_HOME_DIR` (default
   `build/home/`). Case-insensitive, as on Windows. `DS_FILE_TRACE=1` logs every open.
-- **Threads** ([ds_thread.c](src/runtime/ds_thread.c)), **input** ([ds_input.c](src/runtime/ds_input.c):
-  no pad yet; DirectInput with no devices), **offline Winsock** ([ds_net.c](src/runtime/ds_net.c)).
+- **SDL2** ([ds_sdl.c](src/runtime/ds_sdl.c), `DS_VIDEO=sdl`): window + GLES2 context, events into
+  the message queue, the SDL game controller as XInput pad 0. **Input** ([ds_input.c](src/runtime/ds_input.c)).
+  `DS_INPUT="F click X Y; F key VK"` scripts a headless run.
+- **Threads** ([ds_thread.c](src/runtime/ds_thread.c)): real threads under one machine lock, with
+  preemption points (loop back-edges, every frame) so the world generator runs beside the renderer.
+- **Guest heap** (kernel32): size-class free lists, so loading and unloading worlds recycles memory.
+- **Offline Winsock** ([ds_net.c](src/runtime/ds_net.c)).
 - **Lifter / runtime patches** ([patches/pcrecomp](patches/pcrecomp)): 0016 adds the x87
   `fcomi`/`fucomi[p]` compares (3,835 sites); 0017 gives the guest **real `setjmp`/`longjmp`**
   (`RECOMP_HOST_SETJMP`), so Lua's `pcall`/`error` unwinds the host C frames. pcrecomp's `difftest`
@@ -100,9 +113,8 @@ What's in the runtime now ([src/runtime](src/runtime)):
 
 Help wanted, in order:
 
-- **SDL2 backend** for the R36S: an SDL2/KMSDRM window and EGL surface on the Mali GPU, SDL events
-  into the message queue, SDL GameController → XInput for the buttons.
-- **aarch64 build** (glibc ≤ 2.30, as for the ArkOS image) and FPS against box64.
+- **On a real R36S:** the SDL2 backend over KMSDRM on the Mali GPU (written, tested with SDL's
+  offscreen driver), the aarch64 build in a glibc ≤ 2.30 image for ArkOS, and FPS against box64.
 - **FMOD Ex + Event with sound:** SDL audio, FSB banks.
 
 Runtime fixes on the way (useful for anyone using pcrecomp): import-stub names were dangling
@@ -186,7 +198,7 @@ tudo que o port Android perde: todas as DLCs (RoG, Shipwrecked, Hamlet), **mods*
 **Quanto do jogo realmente roda.** Todas as funções já estão *liftadas* para C — essa é a parte
 fácil. O que importa é quantas já **executaram** nativamente sem crashar. Cada célula ≈ 16 funções:
 **clara = rodou em runtime**, escura = liftada mas ainda não alcançada. Hoje a execução passa pelo
-startup do CRT e pela inicialização do jogo, roda os scripts Lua do jogo e **desenha o menu principal** (Play / Mods / Options / Exit) em 640×480, no loop principal. O mapa
+startup do CRT e pela inicialização do jogo, roda os scripts Lua do jogo, **desenha o menu principal**, gera um mundo novo e **joga nele** (personagem, HUD e criaturas), em 640×480. O mapa
 vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, veja `scripts/coverage_counts.py`).
 
 ![mapa de progresso](docs/progress-pt.svg)
@@ -202,11 +214,19 @@ vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, ve
 | M4 Host arena, bind da IAT (955/955), `DllMain` do CRT roda | ✅ feito |
 | M5 Inicialização do CRT — `DllMain` dos 2 CRTs + startup do exe, `main()` do jogo roda | ✅ feito |
 | M6 Menu principal nativo — o jogo recompilado desenha o menu (headless x86-64 + Mesa) | ✅ feito |
-| **M7 Estabilidade** | 🟡 **em progresso — entrar num mundo: input, depois a simulação** |
+| **M7 Estabilidade** | 🟡 **em progresso — um mundo novo é gerado, carregado e simulado; sessões longas a seguir** |
 | M8 Áudio (shim do FMOD Ex) | ⬜ |
 | M9 Pacote PortMaster + FPS vs box64 | ⬜ |
 
 ### 🙋 Onde precisamos de ajuda
+
+**Marcos M6 + dentro de um mundo.** Cliques roteirizados (`DS_INPUT`) levam uma execução
+headless por Play → New Game → Start: a thread `WorldSim` gera o mundo (mapa de voronoi, mapa de
+tiles, estradas, "Generation complete"), o jogo o carrega e simula com o jogador, o HUD e as
+criaturas — **4.795 funções executadas**. O **backend SDL2** (`DS_VIDEO=sdl`) desenha os mesmos
+frames numa janela SDL, com um controle SDL como pad XInput 0. O build cruzado **aarch64**
+([scripts/build_arm64.sh](scripts/build_arm64.sh)) e um lançador do PortMaster
+([port/dontstarve.sh](port/dontstarve.sh)) estão em andamento.
 
 **Marco M6: o menu principal roda nativo.** O `dontstarve.exe` recompilado (o build standalone
 DRM-free; 16.146 funções, 0 falhas de lift) passa pelo CRT, cria a janela, sobe EGL + GLES2,
@@ -233,8 +253,14 @@ O que já existe no runtime ([src/runtime](src/runtime)):
   (padrão `gamedata/`: o `bin/`, `data/` e `mods/` da sua instalação), `Z:\home\…` →
   `$DS_HOME_DIR` (padrão `build/home/`). Sem diferenciar maiúsculas, como no Windows.
   `DS_FILE_TRACE=1` registra cada abertura.
-- **Threads** ([ds_thread.c](src/runtime/ds_thread.c)), **input** ([ds_input.c](src/runtime/ds_input.c):
-  ainda sem controle; DirectInput sem dispositivos), **Winsock offline** ([ds_net.c](src/runtime/ds_net.c)).
+- **SDL2** ([ds_sdl.c](src/runtime/ds_sdl.c), `DS_VIDEO=sdl`): janela + contexto GLES2, eventos na
+  fila de mensagens, o controle SDL como pad XInput 0. **Input** ([ds_input.c](src/runtime/ds_input.c)).
+  `DS_INPUT="F click X Y; F key VK"` roteiriza uma execução headless.
+- **Threads** ([ds_thread.c](src/runtime/ds_thread.c)): threads reais sob uma trava da máquina, com
+  pontos de preempção (voltas de laço, cada frame), para o gerador de mundo rodar ao lado do render.
+- **Heap do guest** (kernel32): listas livres por classe de tamanho, então carregar e descarregar
+  mundos recicla a memória.
+- **Winsock offline** ([ds_net.c](src/runtime/ds_net.c)).
 - **Patches do lifter / runtime** ([patches/pcrecomp](patches/pcrecomp)): o 0016 adiciona as
   comparações x87 `fcomi`/`fucomi[p]` (3.835 pontos); o 0017 dá ao guest **`setjmp`/`longjmp` de
   verdade** (`RECOMP_HOST_SETJMP`), então o `pcall`/`error` do Lua desfaz os frames C do host. O
@@ -245,9 +271,8 @@ O que já existe no runtime ([src/runtime](src/runtime)):
 
 Procura-se ajuda, nesta ordem:
 
-- **Backend SDL2** para o R36S: janela SDL2/KMSDRM e superfície EGL na GPU Mali, eventos SDL na
-  fila de mensagens, SDL GameController → XInput para os botões.
-- **Build aarch64** (glibc ≤ 2.30, como na imagem do ArkOS) e FPS comparado ao box64.
+- **Num R36S de verdade:** o backend SDL2 sobre KMSDRM na GPU Mali (escrito, testado com o driver
+  offscreen do SDL), o build aarch64 numa imagem com glibc ≤ 2.30 para o ArkOS, e FPS comparado ao box64.
 - **FMOD Ex + Event com som:** áudio SDL, bancos FSB.
 
 Correções de runtime no caminho (úteis para quem usa o pcrecomp): os nomes dos stubs de import

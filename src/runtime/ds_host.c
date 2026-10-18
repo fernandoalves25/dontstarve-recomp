@@ -688,8 +688,12 @@ int main(int argc, char **argv) {
     /* Map the exe and the lifted CRT DLLs into the arena at their ImageBases. */
     ds_image img_exe, img_r, img_p;
     if (ds_pe_load(exe, &img_exe) != 0) return 1;
-    int have_r = (ds_pe_load("work/msvcr90.dll", &img_r) == 0); if (have_r) g_msvcr_img = &img_r;
-    int have_p = (ds_pe_load("work/msvcp90.dll", &img_p) == 0); if (have_p) g_msvcp_img = &img_p;
+    /* the VC9 CRT DLLs (the images the lifted code was built from): DS_CRT_DIR, default work/ */
+    const char *crt = getenv("DS_CRT_DIR"); if (!crt || !*crt) crt = "work";
+    char pr[512], pp[512];
+    snprintf(pr, sizeof pr, "%s/msvcr90.dll", crt); snprintf(pp, sizeof pp, "%s/msvcp90.dll", crt);
+    int have_r = (ds_pe_load(pr, &img_r) == 0); if (have_r) g_msvcr_img = &img_r;
+    int have_p = (ds_pe_load(pp, &img_p) == 0); if (have_p) g_msvcp_img = &img_p;
 
     ds_host_init();
     ds_register_manual(0x7857DF6Cu, ds_eh_prolog);     /* msvcr90 __EH_prolog */

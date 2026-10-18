@@ -32,8 +32,8 @@
  "lift_failures": 0,
  "imports_resolved": 921,
  "imports_total": 921,
- "phase_en": "Main menu renders; gameplay next",
- "phase_pt": "Menu renderiza; gameplay a seguir",
+ "phase_en": "In a world; R36S build next",
+ "phase_pt": "Num mundo; build R36S a seguir",
  "milestones": [
   {
    "id": "M0",
