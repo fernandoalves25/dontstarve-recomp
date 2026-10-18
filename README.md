@@ -69,6 +69,9 @@ fills in as the port progresses (measured with a `COVERAGE=1` build, see `script
 **Playing, with sound (M7 + M8).** A scripted headless run goes Play → New Game → Start, holds a
 direction key and **Wilson walks** across the map (grass, then the coast, "Pick Sapling" under the
 cursor) — **5,212 functions executed (4,521 in the game exe)**, exit code 0 after 6,000 frames.
+**Saving and loading work**: the save the game writes after world generation shows up as
+"Survival 1-1" and Continue loads it back into the same world. An 11,000-frame session ran through
+nightfall, Wilson's death in the dark and the "You are dead!" screen without a host error.
 The FMOD shim now **makes sound** ([ds_audio.c](src/runtime/ds_audio.c), `DS_AUDIO=sdl`): it reads
 the game's own `.fev` project files (2,300+ events → sound definitions → waves), plays the waves out
 of the 50 FSB5 banks (7,571 Vorbis streams) through an SDL mixer with 32 voices and 3D
@@ -120,13 +123,17 @@ What's in the runtime now ([src/runtime](src/runtime)):
   `build/home/`). Case-insensitive, as on Windows. `DS_FILE_TRACE=1` logs every open.
 - **DXT without S3TC:** the game's textures are DXT5/DXT1; on a GPU without S3TC (the R36S's
   Mali-G31) the bridge decodes them on the CPU and uploads RGBA4444 (`DS_SOFT_DXT=rgba8` for full
-  precision, `DS_SOFT_DXT=1` forces it; checked against the GPU path: max error 21/255).
+  precision, `DS_SOFT_DXT=1` forces it; checked against the GPU path: max error 21/255). On aarch64
+  textures are also kept one mip level smaller (`DS_TEX_HALF`, a quarter of the memory; at 640×480
+  the frames come out the same).
 - **SDL2** ([ds_sdl.c](src/runtime/ds_sdl.c), `DS_VIDEO=sdl`): window + GLES2 context, events into
   the message queue, the SDL game controller as XInput pad 0. **Input** ([ds_input.c](src/runtime/ds_input.c)).
   `DS_INPUT="F click X Y; F key VK"` scripts a headless run.
 - **Threads** ([ds_thread.c](src/runtime/ds_thread.c)): real threads under one machine lock, with
   preemption points (loop back-edges, every frame) so the world generator runs beside the renderer.
-- **Guest heap** (kernel32): size-class free lists, so loading and unloading worlds recycles memory.
+- **Guest heap** (kernel32): size-class free lists, so loading and unloading worlds recycles memory;
+  freed blocks give their pages back to the OS (resident guest memory in a world: 605 → 285 MB),
+  `DS_HEAP_STATS=N` reports live/free/quarantined bytes every N frames.
 - **Offline Winsock** ([ds_net.c](src/runtime/ds_net.c)).
 - **Lifter / runtime patches** ([patches/pcrecomp](patches/pcrecomp)): 0016 adds the x87
   `fcomi`/`fucomi[p]` compares (3,835 sites); 0017 gives the guest **real `setjmp`/`longjmp`**
@@ -260,7 +267,10 @@ vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, ve
 **Jogando, com som (M7 + M8).** Uma execução headless roteirizada vai em Play → New Game → Start,
 segura uma tecla de direção e o **Wilson anda** pelo mapa (grama, depois a costa, "Pick Sapling"
 sob o cursor) — **5.212 funções executadas (4.521 no exe do jogo)**, código de saída 0 depois de
-6.000 frames. O shim do FMOD agora **faz som** ([ds_audio.c](src/runtime/ds_audio.c),
+6.000 frames. **Salvar e carregar funcionam**: o save que o jogo grava depois de gerar o mundo
+aparece como "Survival 1-1" e o Continue carrega de volta o mesmo mundo. Uma sessão de 11.000
+frames passou pelo anoitecer, pela morte do Wilson no escuro e pela tela "You are dead!" sem erro
+no host. O shim do FMOD agora **faz som** ([ds_audio.c](src/runtime/ds_audio.c),
 `DS_AUDIO=sdl`): ele lê os próprios arquivos de projeto `.fev` do jogo (mais de 2.300 eventos →
 definições de som → ondas), toca as ondas dos 50 bancos FSB5 (7.571 streams Vorbis) num mixer SDL
 de 32 vozes com pan/atenuação 3D a partir do ouvinte. Os eventos seguem os dados do FEV: cada camada tem
@@ -314,14 +324,17 @@ O que já existe no runtime ([src/runtime](src/runtime)):
   `DS_FILE_TRACE=1` registra cada abertura.
 - **DXT sem S3TC:** as texturas do jogo são DXT5/DXT1; numa GPU sem S3TC (a Mali-G31 do R36S) a
   ponte as decodifica na CPU e envia RGBA4444 (`DS_SOFT_DXT=rgba8` para precisão total,
-  `DS_SOFT_DXT=1` força; conferido contra o caminho da GPU: erro máximo 21/255).
+  `DS_SOFT_DXT=1` força; conferido contra o caminho da GPU: erro máximo 21/255). No aarch64 as
+  texturas também ficam um nível de mip menores (`DS_TEX_HALF`, um quarto da memória; em 640×480 os
+  frames saem iguais).
 - **SDL2** ([ds_sdl.c](src/runtime/ds_sdl.c), `DS_VIDEO=sdl`): janela + contexto GLES2, eventos na
   fila de mensagens, o controle SDL como pad XInput 0. **Input** ([ds_input.c](src/runtime/ds_input.c)).
   `DS_INPUT="F click X Y; F key VK"` roteiriza uma execução headless.
 - **Threads** ([ds_thread.c](src/runtime/ds_thread.c)): threads reais sob uma trava da máquina, com
   pontos de preempção (voltas de laço, cada frame), para o gerador de mundo rodar ao lado do render.
 - **Heap do guest** (kernel32): listas livres por classe de tamanho, então carregar e descarregar
-  mundos recicla a memória.
+  mundos recicla a memória; blocos liberados devolvem as páginas ao SO (memória residente do guest
+  num mundo: 605 → 285 MB), `DS_HEAP_STATS=N` mostra bytes vivos/livres/em quarentena a cada N frames.
 - **Winsock offline** ([ds_net.c](src/runtime/ds_net.c)).
 - **Patches do lifter / runtime** ([patches/pcrecomp](patches/pcrecomp)): o 0016 adiciona as
   comparações x87 `fcomi`/`fucomi[p]` (3.835 pontos); o 0017 dá ao guest **`setjmp`/`longjmp` de

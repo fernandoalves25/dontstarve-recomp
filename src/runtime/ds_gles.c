@@ -241,13 +241,24 @@ static void sh_glCompileShader(void)        { glCompileShader(U(0)); RETV(1); }
 #define FMT_DXT1_RGBA 0x83F1
 #define FMT_DXT3      0x83F2
 #define FMT_DXT5      0x83F3
-static int g_soft_dxt = -1, g_dxt_rgba8;
+static int g_soft_dxt = -1, g_dxt_rgba8, g_tex_half;
 static int soft_dxt(void) {
     if (g_soft_dxt < 0) {
         const char *v = getenv("DS_SOFT_DXT"), *x = (const char *)glGetString(GL_EXTENSIONS);
         g_dxt_rgba8 = v && !strcmp(v, "rgba8");
+        /* DS_TEX_HALF=1 (default on aarch64): textures one mip level smaller --
+         * level 0 is box-filtered to half size, then the game's own level k is
+         * stored as level k - 1. A 640x480 screen hardly ever samples the
+         * full-size level, and it is three quarters of the memory. */
+        const char *hv = getenv("DS_TEX_HALF");
+#if defined(__aarch64__)
+        g_tex_half = !hv || atoi(hv) != 0;
+#else
+        g_tex_half = hv && atoi(hv) != 0;
+#endif
         g_soft_dxt = (v && *v && strcmp(v, "0")) || !x || !strstr(x, "texture_compression_s3tc");
-        if (g_soft_dxt) fprintf(stderr, "[egl] no S3TC on this GPU: DXT textures decoded on the CPU (%s)\n", g_dxt_rgba8 ? "RGBA8" : "RGBA4444");
+        if (g_soft_dxt) fprintf(stderr, "[egl] no S3TC on this GPU: DXT textures decoded on the CPU (%s%s)\n",
+                                g_dxt_rgba8 ? "RGBA8" : "RGBA4444", g_tex_half ? ", half size" : "");
     }
     return g_soft_dxt;
 }
@@ -282,25 +293,40 @@ static int dxt_upload(GLenum target, GLint level, GLenum f, GLsizei w, GLsizei h
     if (f != FMT_DXT1_RGB && f != FMT_DXT1_RGBA && f != FMT_DXT3 && f != FMT_DXT5) return 0;
     size_t bs = f == FMT_DXT3 || f == FMT_DXT5 ? 16 : 8;
     int bw = (w + 3) / 4, bh = (h + 3) / 4;
-    void *out = malloc((size_t)w * (size_t)h * (g_dxt_rgba8 ? 4 : 2) + 16);
-    if (!out) return 0;
+    uint8_t *rgba = (uint8_t *)malloc((size_t)w * (size_t)h * 4 + 16);
+    if (!rgba) return 0;
     for (int by = 0; by < bh; by++)
         for (int bx = 0; bx < bw; bx++) {
             uint8_t px[16][4];
             if (d) dxt_block(f, d + ((size_t)by * (size_t)bw + (size_t)bx) * bs, px); else memset(px, 0, sizeof px);
             for (int i = 0; i < 16; i++) {
                 int x = bx * 4 + (i & 3), y = by * 4 + (i >> 2);
-                if (x >= w || y >= h) continue;
-                size_t o = (size_t)y * (size_t)w + (size_t)x;
-                if (g_dxt_rgba8) memcpy((uint8_t *)out + 4 * o, px[i], 4);
-                else ((uint16_t *)out)[o] = (uint16_t)((px[i][0] >> 4) << 12 | (px[i][1] >> 4) << 8 | (px[i][2] >> 4) << 4 | (px[i][3] >> 4));
+                if (x < w && y < h) memcpy(rgba + 4 * ((size_t)y * (size_t)w + (size_t)x), px[i], 4);
             }
         }
+    if (g_tex_half && level > 0) level--;                       /* the game's level k is our k - 1 */
+    else if (g_tex_half && w > 1 && h > 1) {                    /* level 0: box-filter to half size */
+        int hw = w / 2, hh = h / 2;
+        for (int y = 0; y < hh; y++)
+            for (int x = 0; x < hw; x++)
+                for (int c = 0; c < 4; c++) {
+                    const uint8_t *p = rgba + 4 * ((size_t)(2 * y) * (size_t)w + (size_t)(2 * x)) + c;
+                    rgba[4 * ((size_t)y * (size_t)hw + (size_t)x) + c] = (uint8_t)((p[0] + p[4] + p[4 * w] + p[4 * w + 4] + 2) / 4);
+                }
+        w = hw; h = hh;
+    }
+    if (!g_dxt_rgba8) {                                         /* RGBA4444, in place */
+        uint16_t *o = (uint16_t *)rgba;
+        for (size_t i = 0; i < (size_t)w * (size_t)h; i++) {
+            const uint8_t *p = rgba + 4 * i;
+            o[i] = (uint16_t)((p[0] >> 4) << 12 | (p[1] >> 4) << 8 | (p[2] >> 4) << 4 | (p[3] >> 4));
+        }
+    }
     GLint align; glGetIntegerv(GL_UNPACK_ALIGNMENT, &align);
     glPixelStorei(GL_UNPACK_ALIGNMENT, g_dxt_rgba8 ? 4 : 2);
-    glTexImage2D(target, level, GL_RGBA, w, h, 0, GL_RGBA, g_dxt_rgba8 ? GL_UNSIGNED_BYTE : GL_UNSIGNED_SHORT_4_4_4_4, out);
+    glTexImage2D(target, level, GL_RGBA, w, h, 0, GL_RGBA, g_dxt_rgba8 ? GL_UNSIGNED_BYTE : GL_UNSIGNED_SHORT_4_4_4_4, rgba);
     glPixelStorei(GL_UNPACK_ALIGNMENT, align);
-    free(out);
+    free(rgba);
     return 1;
 }
 
