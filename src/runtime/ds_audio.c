@@ -114,14 +114,16 @@ static void build_index(void) {
  * table. An event is a path ("dontstarve/bee/bee_takeoff"); its sound
  * definitions list weighted waves (FEV bank index + wave index in that FSB). */
 typedef struct { uint16_t bank, idx, weight; } fev_ent;          /* bank: our g_banks index */
-typedef struct { int n; fev_ent *e; } fev_def;
+/* a sound definition: weighted waves, played at vol; spawn_max > 0: while the
+ * event plays, a new wave starts every spawn_min..spawn_max ms (nspawn at once) */
+typedef struct { int n, cfg; fev_ent *e; float vol; uint32_t spawn_min, spawn_max, nspawn; } fev_def;
 /* a layer plays one sound definition while its parameter (if any) is inside
  * [lo, hi] (normalized 0..1 over the parameter's range); env: it has envelopes */
-typedef struct { int def, param, env; float lo, hi; } fev_layer;
+typedef struct { int def, param, env, loop; float lo, hi; } fev_layer;
 #define MAXLAY 8
 #define MAXPAR 4
 typedef struct {
-    char *path; int fev, nlay, npar; fev_layer lay[MAXLAY];
+    char *path, *cat; int fev, nlay, npar; fev_layer lay[MAXLAY];
     const char *pname[MAXPAR]; float pmin[MAXPAR], pmax[MAXPAR];
 } fev_event;
 static fev_def *g_defs[8]; static int g_ndefs[8];               /* per .fev */
@@ -185,7 +187,8 @@ static void load_fev(const uint8_t *d, size_t n) {
         if (!cnt || cnt > 100000 || cnt <= ndefs) continue;
         fev_def *dd = (fev_def *)calloc(cnt, sizeof *dd);
         for (uint32_t k = 0; k < cnt && !t.bad; k++) {
-            uint32_t nm = r32(&t); r32(&t); uint32_t ne = r32(&t);
+            uint32_t nm = r32(&t), cf = r32(&t), ne = r32(&t);
+            dd[k].cfg = (int)cf; dd[k].vol = 1.0f;
             if (nm >= ns || S[nm][0] != '/' || ne > 10000) { t.bad = 1; break; }
             dd[k].e = (fev_ent *)calloc(ne ? ne : 1, sizeof(fev_ent));
             for (uint32_t e = 0; e < ne && !t.bad; e++) {
@@ -226,34 +229,37 @@ static void load_fev(const uint8_t *d, size_t n) {
                 st[sp - 1].left_ev--;
                 size_t es = r.p; uint32_t ty = r32(&r), en = r32(&r);
                 if (en >= ns) { r.bad = 1; break; }
-                size_t end = 0, cl = 0;                     /* the closing category string: one forward scan */
+                size_t end = 0, cl = 0; int ci = -1;        /* the closing category string: one forward scan */
                 for (size_t q = es + 8; q + 8 <= defs_at && !end; q++) {
                     uint32_t v; memcpy(&v, lg + q, 4);
                     if (v < 2 || v > 128) continue;
                     for (int c = 0; c < ncats; c++)
-                        if (strlen(cats[c]) + 1 == v && q + 4 + v <= defs_at && !memcmp(lg + q + 4, cats[c], v)) { end = q; cl = 4 + v; break; }
+                        if (strlen(cats[c]) + 1 == v && q + 4 + v <= defs_at && !memcmp(lg + q + 4, cats[c], v)) { end = q; cl = 4 + v; ci = c; break; }
                 }
                 if (!end) { r.bad = 1; break; }
                 fev_event *e;
                 g_events = (fev_event *)realloc(g_events, sizeof *g_events * (size_t)(g_nevents + 1));
                 e = &g_events[g_nevents++]; memset(e, 0, sizeof *e); e->fev = fi;
                 char path[320]; snprintf(path, sizeof path, "%s/%s", st[sp - 1].path, S[en]); e->path = strdup(path);
+                e->cat = strdup(cats[ci]);
                 if (ty == 0x10) {
                     uint16_t di; memcpy(&di, lg + es + 172, 2);
-                    if (di < ndefs) { fev_layer *y = &e->lay[e->nlay++]; y->def = di; y->param = -1; y->lo = 0; y->hi = 1; }
+                    uint32_t mode; memcpy(&mode, lg + es + 186, 4);     /* 0: loop, 1: one-shot */
+                    if (di < ndefs) { fev_layer *y = &e->lay[e->nlay++]; y->def = di; y->param = -1; y->lo = 0; y->hi = 1; y->loop = mode == 0; }
                 }
                 /* a complex event's layers: u16 flags (2), i16 priority (-1),
                  * i16 parameter, u16 nsounds, u16 nenvelopes, then the first
                  * sound instance's u16 sound definition */
                 else {
-                    for (size_t q = es + 8; q + 20 <= end && e->nlay < MAXLAY; q++) {
+                    for (size_t q = es + 8; q + 28 <= end && e->nlay < MAXLAY; q++) {
                         const uint8_t *L = lg + q;
                         if (L[0] != 2 || L[1] || L[2] != 0xFF || L[3] != 0xFF || L[6] < 1 || L[6] > 8 || L[7] || L[8] > 0x20 || L[9]) continue;
                         uint16_t di; int16_t pi; float st, ln;
                         memcpy(&di, L + 10, 2); memcpy(&pi, L + 4, 2); memcpy(&st, L + 12, 4); memcpy(&ln, L + 16, 4);
                         if (di >= ndefs) continue;
                         fev_layer *y = &e->lay[e->nlay++];
-                        y->def = di; y->param = pi; y->env = L[8]; y->lo = st; y->hi = st + ln;
+                        uint32_t mode; memcpy(&mode, L + 24, 4);
+                        y->def = di; y->param = pi; y->env = L[8]; y->lo = st; y->hi = st + ln; y->loop = mode == 0;
                         if (!(y->lo >= 0.0f && y->hi <= 1.01f && y->hi > y->lo)) { y->lo = 0; y->hi = 1; }
                     }
                     /* the parameters: u32 n, n x 32 bytes { u32 name, u32 0, f32 min,
@@ -278,6 +284,20 @@ static void load_fev(const uint8_t *d, size_t n) {
             }
             sp--;
         }
+    }
+    /* the sound definition configs follow the event tree: u32 n, n x 74 bytes
+     * { u32 play mode, u32 spawn min ms, u32 spawn max ms, u32 max spawned, f32 volume, ... } */
+    if (!r.bad) {
+        uint32_t nc = r32(&r);
+        if (!r.bad && r.p + 74ull * nc <= defs_at)
+            for (uint32_t k = 0; k < ndefs; k++) {
+                fev_def *df = &defs[k]; if (df->cfg < 0 || (uint32_t)df->cfg >= nc) continue;
+                const uint8_t *C = lg + r.p + 74u * (uint32_t)df->cfg;
+                memcpy(&df->spawn_min, C + 4, 4); memcpy(&df->spawn_max, C + 8, 4); memcpy(&df->nspawn, C + 12, 4); memcpy(&df->vol, C + 16, 4);
+                if (!(df->vol >= 0.0f && df->vol <= 4.0f)) df->vol = 1.0f;
+                if (df->spawn_max > 600000 || df->spawn_min > df->spawn_max) df->spawn_min = df->spawn_max = 0;
+                if (df->nspawn < 1) df->nspawn = 1; if (df->nspawn > 4) df->nspawn = 4;
+            }
     }
     int nodef = 0; for (int i = nev0; i < g_nevents; i++) nodef += !g_events[i].nlay;
     fprintf(stderr, "[audio] %s.fev: %d events (%d without a sound), %u sound definitions%s\n", proj, g_nevents - nev0, nodef, ndefs, r.bad ? " (tree cut short)" : "");
@@ -314,9 +334,9 @@ static int wave_of(uint16_t bank, uint16_t idx) {               /* our wave inde
     for (int i = 0; i < g_nwaves; i++) if (g_waves[i].bank == bank) return i + idx < g_nwaves && g_waves[i + idx].bank == bank ? i + idx : -1;
     return -1;
 }
-typedef struct { int n; int idx[24]; int param, env; float lo, hi; } evlayer;
+typedef struct { int n; int idx[24]; int param, env, loop; float lo, hi, vol; uint32_t spawn_min, spawn_max, nspawn; } evlayer;
 typedef struct {
-    int nlay, loop, npar; evlayer lay[MAXLAY];
+    int nlay, loop, npar; evlayer lay[MAXLAY]; const char *cat;
     const char *pname[MAXPAR]; float pmin[MAXPAR], pmax[MAXPAR];
 } evmap;
 static void map_event(const char *path, evmap *m) {
@@ -331,10 +351,11 @@ static void map_event(const char *path, evmap *m) {
             for (int j = 0; j < d->n && y->n < 24; j++) { int w = wave_of(d->e[j].bank, d->e[j].idx); if (w >= 0) y->idx[y->n++] = w; }
             if (!y->n) continue;
             y->param = e->lay[k].param < e->npar ? e->lay[k].param : -1;
-            y->env = e->lay[k].env; y->lo = e->lay[k].lo; y->hi = e->lay[k].hi;
+            y->env = e->lay[k].env; y->lo = e->lay[k].lo; y->hi = e->lay[k].hi; y->loop = e->lay[k].loop;
+            y->vol = d->vol; y->spawn_min = d->spawn_min; y->spawn_max = d->spawn_max; y->nspawn = d->spawn_max ? d->nspawn : 1;
             m->nlay++;
         }
-        m->npar = e->npar;
+        m->npar = e->npar; m->cat = e->cat;
         for (int k = 0; k < e->npar; k++) { m->pname[k] = e->pname[k]; m->pmin[k] = e->pmin[k]; m->pmax[k] = e->pmax[k]; }
         break;
     }
@@ -346,14 +367,15 @@ static void map_event(const char *path, evmap *m) {
         snprintf(stems[0], sizeof stems[0], "%s", leaf);
         snprintf(stems[1], sizeof stems[1], "%s_%s", grp, leaf);
         snprintf(stems[2], sizeof stems[2], "%s%s", grp, leaf);
-        evlayer *y = &m->lay[0]; y->param = -1; y->lo = 0; y->hi = 1;
+        evlayer *y = &m->lay[0]; y->param = -1; y->lo = 0; y->hi = 1; y->vol = 1; y->nspawn = 1;
         for (int s = 0; s < 3 && y->n == 0; s++)
             for (int i = 0; i < g_nwaves && y->n < 24; i++)
                 if (name_match(g_waves[i].name, stems[s])) y->idx[y->n++] = i;
         m->nlay = y->n ? 1 : 0;
+        y->loop = (strstr(leaf, "LP") != NULL || strcasestr(leaf, "amb") != NULL || strcasestr(path, "/music/") != NULL)
+                  && !strcasestr(leaf, "stinger");
     }
-    m->loop = (strstr(leaf, "LP") != NULL || strcasestr(leaf, "amb") != NULL || strcasestr(path, "/music/") != NULL)
-              && !strcasestr(leaf, "stinger");
+    for (int k = 0; k < m->nlay; k++) m->loop |= m->lay[k].loop || m->lay[k].spawn_max;
 }
 
 /* ===================== Vorbis headers (rebuilt with libvorbis's encoder) */
@@ -475,6 +497,8 @@ fail:
 typedef struct {
     int active, loop; uint32_t ev;               /* ev: event handle that owns it */
     int layer; const evlayer *lay;               /* looping layers pick a new wave each time round */
+    uint32_t wait;                               /* spawning layers: silent frames before the next wave */
+    const char *cat;                             /* the event's category ("set_sfx/voice") */
     const wave *w; double pos, step;
     float vol, gain_l, gain_r;
     float x, y, z; int has3d;
@@ -510,6 +534,25 @@ static int decode_lru(wave *w) {
     return 1;
 }
 
+/* Category volumes, set by the game's mixer ("master", "set_music/soundtrack",
+ * "set_sfx/voice", ...): an event is scaled by its category and every parent. */
+#define MAXCAT 64
+static struct { char name[64]; float vol; } g_cat[MAXCAT]; static int g_ncat;
+int ds_audio_category(const char *name) {
+    for (int i = 0; i < g_ncat; i++) if (!strcasecmp(g_cat[i].name, name)) return i;
+    if (g_ncat >= MAXCAT) return -1;
+    snprintf(g_cat[g_ncat].name, sizeof g_cat[0].name, "%s", name); g_cat[g_ncat].vol = 1.0f;
+    return g_ncat++;
+}
+static float cat_vol(const char *path) {
+    float g = 1.0f;
+    for (int i = 0; i < g_ncat; i++) {
+        size_t l = strlen(g_cat[i].name);
+        if (!strcasecmp(g_cat[i].name, "master") || (path && !strncasecmp(path, g_cat[i].name, l) && (!path[l] || path[l] == '/')))
+            g *= g_cat[i].vol;
+    }
+    return g;
+}
 static void spatialize(voice *v) {
     float l = 1.0f, r = 1.0f, att = 1.0f;
     if (v->has3d) {
@@ -518,7 +561,8 @@ static void spatialize(voice *v) {
         float pan = d > 0.01f ? dx / (d + 6.0f) : 0.0f;            /* -1 .. 1 */
         l = pan > 0 ? 1.0f - pan : 1.0f; r = pan < 0 ? 1.0f + pan : 1.0f;
     }
-    v->gain_l = v->vol * att * l * g_master; v->gain_r = v->vol * att * r * g_master;
+    float c = cat_vol(v->cat);
+    v->gain_l = v->vol * att * l * c * g_master; v->gain_r = v->vol * att * r * c * g_master;
 }
 #ifdef DS_SDL
 static void mix_cb(void *ud, Uint8 *stream, int len) {
@@ -533,11 +577,24 @@ static void mix_cb(void *ud, Uint8 *stream, int len) {
         const wave *w = v->w;
         for (int i = 0; i < frames; i++) {
             uint32_t p = (uint32_t)v->pos;
+            if (v->wait) {                                     /* between two spawned waves */
+                if (--v->wait) continue;
+                if (v->lay && v->lay->n > 1) {
+                    const wave *n = &g_waves[v->lay->idx[rand() % v->lay->n]];
+                    if (n->pcm) { v->w = w = n; v->step = (double)w->rate / OUT_RATE; }
+                }
+                v->pos = 0; p = 0;
+            }
             if (p >= w->frames) {
+                const evlayer *y = v->lay;
+                if (y && y->spawn_max && v->ev) {                 /* spawn the next one later */
+                    uint32_t ms = y->spawn_min + (y->spawn_max > y->spawn_min ? (uint32_t)rand() % (y->spawn_max - y->spawn_min) : 0);
+                    v->wait = ms * (OUT_RATE / 1000) + 1; v->pos = 0; continue;
+                }
                 if (!v->loop) { v->active = 0; break; }
                 v->pos -= w->frames;
-                if (v->lay && v->lay->n > 1) {                  /* another of the layer's waves, if decoded */
-                    const wave *n = &g_waves[v->lay->idx[rand() % v->lay->n]];
+                if (y && y->n > 1) {                            /* another of the layer's waves, if decoded */
+                    const wave *n = &g_waves[y->idx[rand() % y->n]];
                     if (n->pcm) { v->w = w = n; v->pos = 0; v->step = (double)w->rate / OUT_RATE; }
                 }
                 p = (uint32_t)v->pos;
@@ -584,7 +641,7 @@ static int audio_on(void) {
 /* ===================== the FMOD shim's view: events */
 typedef struct {
     int used, started; evmap m; float vol; float x, y, z; int has3d;
-    float val[MAXPAR]; int voice[MAXLAY];          /* parameter values; each layer's voice or -1 */
+    float val[MAXPAR];                             /* parameter values */
 } event;
 static event g_ev[DS_AUDIO_MAXEV];
 
@@ -594,7 +651,6 @@ uint32_t ds_audio_event_new(const char *path) {
     for (uint32_t i = 1; i < DS_AUDIO_MAXEV; i++) if (!g_ev[i].used) {
         event *e = &g_ev[i]; memset(e, 0, sizeof *e);
         e->used = 1; e->vol = 1.0f;
-        for (int k = 0; k < MAXLAY; k++) e->voice[k] = -1;
         map_event(path, &e->m);
         for (int k = 0; k < e->m.npar; k++) e->val[k] = e->m.pmin[k];
         if (getenv("DS_AUDIO_TRACE")) {
@@ -619,40 +675,47 @@ static float layer_gain(const event *e, int k) {
     if (y->env && y->lo <= 0.01f && y->hi >= 0.98f) { float g = 2.0f * t; return g < 0 ? 0 : g > 1 ? 1 : g; }
     return t >= y->lo - 0.001f && t <= y->hi + 0.001f ? 1.0f : 0.0f;
 }
-static int voice_of(const event *e, uint32_t id, int k) {
-    int v = e->voice[k];
-    return v >= 0 && g_voice[v].active && g_voice[v].ev == id && g_voice[v].layer == k ? v : -1;
+/* the voices of event id's layer k (k < 0: any layer); g_mix held */
+static int layer_voices(uint32_t id, int k, int stop) {
+    int n = 0;
+    for (int i = 0; i < NVOICE; i++) {
+        voice *v = &g_voice[i];
+        if (!v->active || v->ev != id || (k >= 0 && v->layer != k)) continue;
+        n++; if (stop) v->active = 0;
+    }
+    return n;
 }
 /* g_mix held */
-static void start_layer(event *e, uint32_t id, int k, wave *w) {
+static void start_layer(event *e, uint32_t id, int k, wave *w, uint32_t wait) {
     int n = -1;
     for (int i = 0; i < NVOICE; i++) if (!g_voice[i].active) { n = i; break; }
     if (n < 0) n = rand() % NVOICE;                             /* steal */
+    const evlayer *y = &e->m.lay[k];
     voice *v = &g_voice[n]; memset(v, 0, sizeof *v);
-    v->active = 1; v->loop = e->m.loop; v->ev = id; v->layer = k; v->lay = &e->m.lay[k]; v->w = w;
-    v->step = (double)w->rate / OUT_RATE; v->vol = e->vol * layer_gain(e, k);
+    v->active = 1; v->loop = y->loop; v->ev = id; v->layer = k; v->lay = y; v->w = w; v->wait = wait; v->cat = e->m.cat;
+    v->step = (double)w->rate / OUT_RATE; v->vol = e->vol * y->vol * layer_gain(e, k);
     v->x = e->x; v->y = e->y; v->z = e->z; v->has3d = e->has3d;
     spatialize(v);
-    e->voice[k] = n;
 }
 /* Start the layers that should sound now and are not playing (decoding outside the lock). */
 static void sync_layers(event *e, uint32_t id) {
     for (int k = 0; k < e->m.nlay; k++) {
         const evlayer *y = &e->m.lay[k];
-        pthread_mutex_lock(&g_mix); int on = voice_of(e, id, k) >= 0; pthread_mutex_unlock(&g_mix);
+        pthread_mutex_lock(&g_mix); int on = layer_voices(id, k, 0) > 0; pthread_mutex_unlock(&g_mix);
         float g = layer_gain(e, k);
         if (on || (g <= 0.0f && !(y->env && y->param >= 0))) {
             if (on && g <= 0.0f && !y->env) {                   /* left its range: stop */
-                pthread_mutex_lock(&g_mix);
-                int v = voice_of(e, id, k); if (v >= 0) g_voice[v].active = 0; e->voice[k] = -1;
-                pthread_mutex_unlock(&g_mix);
+                pthread_mutex_lock(&g_mix); layer_voices(id, k, 1); pthread_mutex_unlock(&g_mix);
             }
             continue;
         }
         wave *w = &g_waves[y->idx[rand() % y->n]];
         if (!decode_lru(w)) continue;
-        if (e->m.loop) for (int j = 0; j < y->n; j++) decode_lru(&g_waves[y->idx[j]]);   /* variety on each loop */
-        pthread_mutex_lock(&g_mix); start_layer(e, id, k, w); pthread_mutex_unlock(&g_mix);
+        if (y->loop || y->spawn_max) for (int j = 0; j < y->n; j++) decode_lru(&g_waves[y->idx[j]]);   /* variety */
+        pthread_mutex_lock(&g_mix);
+        for (uint32_t j = 0; j < y->nspawn; j++)                /* extra spawners start a little later */
+            start_layer(e, id, k, w, j ? (y->spawn_min + (uint32_t)rand() % (y->spawn_max - y->spawn_min + 1)) * (OUT_RATE / 1000) + 1 : 0);
+        pthread_mutex_unlock(&g_mix);
     }
 }
 void ds_audio_event_start(uint32_t id) {
@@ -664,26 +727,26 @@ void ds_audio_event_start(uint32_t id) {
 void ds_audio_event_stop(uint32_t id) {
     event *e = ev(id); if (!e) return;
     pthread_mutex_lock(&g_mix);
-    for (int k = 0; k < MAXLAY; k++) { int v = voice_of(e, id, k); if (v >= 0) g_voice[v].active = 0; e->voice[k] = -1; }
+    layer_voices(id, -1, 1);
     e->started = 0;
     pthread_mutex_unlock(&g_mix);
 }
 void ds_audio_event_release(uint32_t id) {        /* the game lets go: loops stop, one-shots finish */
     event *e = ev(id); if (!e) return;
     pthread_mutex_lock(&g_mix);
-    for (int k = 0; k < MAXLAY; k++) {
-        int v = voice_of(e, id, k);
-        if (v >= 0) { if (g_voice[v].loop) g_voice[v].active = 0; else { g_voice[v].ev = 0; g_voice[v].lay = NULL; } }
+    for (int i = 0; i < NVOICE; i++) {
+        voice *v = &g_voice[i]; if (!v->active || v->ev != id) continue;
+        if (v->loop || v->wait || (v->lay && v->lay->spawn_max)) v->active = 0;   /* loops and spawners end */
+        else { v->ev = 0; v->lay = NULL; }                                        /* a one-shot plays out */
     }
     e->used = 0;
     pthread_mutex_unlock(&g_mix);
 }
 /* g_mix held */
 static void ev_update(event *e, uint32_t id) {
-    for (int k = 0; k < e->m.nlay; k++) {
-        int n = voice_of(e, id, k); if (n < 0) continue;
-        voice *v = &g_voice[n];
-        v->vol = e->vol * layer_gain(e, k); v->x = e->x; v->y = e->y; v->z = e->z; v->has3d = e->has3d;
+    for (int i = 0; i < NVOICE; i++) {
+        voice *v = &g_voice[i]; if (!v->active || v->ev != id || v->layer >= e->m.nlay) continue;
+        v->vol = e->vol * e->m.lay[v->layer].vol * layer_gain(e, v->layer); v->x = e->x; v->y = e->y; v->z = e->z; v->has3d = e->has3d;
         spatialize(v);
     }
 }
@@ -712,7 +775,7 @@ void ds_audio_event_param(uint32_t id, int idx, float value) {
 int ds_audio_event_playing(uint32_t id) {
     event *e = ev(id); if (!e) return 0;
     pthread_mutex_lock(&g_mix);
-    int p = 0; for (int k = 0; k < e->m.nlay && !p; k++) p = voice_of(e, id, k) >= 0;
+    int p = layer_voices(id, -1, 0) > 0;
     pthread_mutex_unlock(&g_mix);
     return p;
 }
@@ -722,3 +785,11 @@ void ds_audio_listener(float x, float y, float z) {
     for (int i = 0; i < DS_AUDIO_MAXEV; i++) if (g_ev[i].used) ev_update(&g_ev[i], (uint32_t)i);
     pthread_mutex_unlock(&g_mix);
 }
+void ds_audio_category_volume(int idx, float vol) {
+    if (idx < 0 || idx >= g_ncat) return;
+    pthread_mutex_lock(&g_mix);
+    g_cat[idx].vol = vol < 0 ? 0 : vol;
+    for (int i = 0; i < NVOICE; i++) if (g_voice[i].active) spatialize(&g_voice[i]);
+    pthread_mutex_unlock(&g_mix);
+}
+float ds_audio_category_get(int idx) { return idx >= 0 && idx < g_ncat ? g_cat[idx].vol : 1.0f; }

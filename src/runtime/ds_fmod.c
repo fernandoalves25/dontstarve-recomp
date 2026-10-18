@@ -34,7 +34,7 @@ enum { FO_EVENTSYSTEM = 0xF0D00001u, FO_SYSTEM, FO_SOUND, FO_CHANNEL, FO_DSP, FO
  * implementation). One generic shim serves every slot: it finds the method by
  * the VA it was called through. argc includes `this`. */
 static int fmod_trace = -1;
-enum { V_OK, V_OBJ, V_ZERO, V_ONE_F, V_SETUD, V_GETUD, V_READY, V_INFO };
+enum { V_OK, V_OBJ, V_ZERO, V_ONE_F, V_SETUD, V_GETUD, V_READY, V_INFO, V_CATSET, V_CATGET };
 typedef struct { const char *name; uint8_t argc, act, idx; uint32_t kind; } vmeth;
 static const vmeth k_project[] = {
     { "EventProject::release", 1, V_OK }, { "EventProject::getInfo", 2, V_OK },
@@ -50,7 +50,7 @@ static const vmeth k_category[] = {
     { "EventCategory::getCategoryByIndex", 3, V_OBJ, 2, FO_CATEGORY }, { "EventCategory::getNumCategories", 2, V_ZERO, 1 },
     { "EventCategory::getEventByIndex", 4, V_OBJ, 3, FO_EVENT }, { "EventCategory::getNumEvents", 2, V_ZERO, 1 },
     { "EventCategory::getParentCategory", 2, V_ZERO, 1 }, { "EventCategory::stopAllEvents", 1, V_OK },
-    { "EventCategory::setVolume", 2, V_OK }, { "EventCategory::getVolume", 2, V_ONE_F, 1 },
+    { "EventCategory::setVolume", 2, V_CATSET }, { "EventCategory::getVolume", 2, V_CATGET, 1 },
     { "EventCategory::setPitch", 3, V_OK }, { "EventCategory::getPitch", 3, V_ZERO, 1 },
     { "EventCategory::setPaused", 2, V_OK }, { "EventCategory::getPaused", 2, V_ZERO, 1 },
     { "EventCategory::setMute", 2, V_OK }, { "EventCategory::getMute", 2, V_ZERO, 1 },
@@ -85,6 +85,8 @@ static void sh_fmod_virtual(void) {           /* every EventProject/Category/Gro
     case V_ZERO:  if (p) MEM32(p) = 0; break;
     case V_ONE_F: if (p) MEM32(p) = 0x3F800000u; break;                  /* 1.0f */
     case V_READY: if (p) MEM32(p) = FMOD_EVENT_STATE_READY; break;
+    case V_CATSET: ds_audio_category_volume((int)MEM32(self + 8) - 1, AF32(1)); break;   /* +8: category index + 1 */
+    case V_CATGET: if (p) { float v = ds_audio_category_get((int)MEM32(self + 8) - 1); memcpy(ds_hostptr(p), &v, 4); } break;
     case V_SETUD: MEM32(self + 4) = A32(1); break;
     case V_GETUD: if (A32(1)) MEM32(A32(1)) = MEM32(self + 4); break;
     case V_INFO: {                                                        /* (this, int *index, char **name) */
@@ -162,7 +164,15 @@ static void sh_ES_getEvent(void) {                       /* (this, name, mode, E
     if (A32(3)) MEM32(A32(3)) = o;
     RET(FMOD_OK, 4);
 }
-static void sh_ES_getCategory(void) { out_obj(A32(2), FO_CATEGORY); RET(FMOD_OK, 3); }   /* (this, name, EventCategory **) */
+static void sh_ES_getCategory(void) {                    /* (this, name, EventCategory **): one object per name */
+    static uint32_t objs[64], none;
+    int k = ds_audio_category(ASTR(1));
+    uint32_t o;
+    if (k >= 0 && k < 64) { if (!objs[k]) { objs[k] = obj_new(FO_CATEGORY); MEM32(objs[k] + 8) = (uint32_t)k + 1; } o = objs[k]; }
+    else { if (!none) none = obj_new(FO_CATEGORY); o = none; }
+    if (A32(2)) MEM32(A32(2)) = o;
+    RET(FMOD_OK, 3);
+}
 static void sh_ES_setReverbProperties(void) { RET(FMOD_OK, 2); }
 static void sh_ES_getReverbPreset(void) {                /* (this, name, FMOD_REVERB_PROPERTIES *, int *index) */
     if (A32(2)) memset(ds_hostptr(A32(2)), 0, 0x58);     /* sizeof(FMOD_REVERB_PROPERTIES) in 4.44 */

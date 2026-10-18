@@ -23,6 +23,10 @@ GAMEDIR="/$directory/ports/dontstarve"
 cd "$GAMEDIR" || exit 1
 > "$GAMEDIR/log.txt" && exec > >(tee "$GAMEDIR/log.txt") 2>&1
 
+for f in gamedata/bin/dontstarve.exe gamedata/data crt/msvcr90.dll crt/msvcp90.dll; do
+    [ -e "$f" ] || { echo "missing ports/dontstarve/$f -- see ports/dontstarve/README.md"; pm_finish; exit 1; }
+done
+
 export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
 export DS_VIDEO=sdl                       # SDL2 window (KMSDRM) + GLES2 on the Mali GPU
 export DS_SCREEN="${DISPLAY_WIDTH:-640}x${DISPLAY_HEIGHT:-480}"

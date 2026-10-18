@@ -92,6 +92,9 @@ void      ds_audio_event_pos(uint32_t id, float x, float y, float z);
 int       ds_audio_event_playing(uint32_t id);
 int       ds_audio_event_param_index(uint32_t id, const char *name);   /* -1: no such parameter */
 void      ds_audio_event_param(uint32_t id, int idx, float value);
+int       ds_audio_category(const char *name);                  /* index, made on first use */
+void      ds_audio_category_volume(int idx, float vol);
+float     ds_audio_category_get(int idx);
 void      ds_audio_listener(float x, float y, float z);
 uint32_t  ds_frame_count(void);                           /* frames swapped so far (ds_gles.c) */
 void      ds_set_last_error(uint32_t err);                /* kernel32 GetLastError value */
