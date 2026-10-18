@@ -35,6 +35,12 @@ export DS_HOME_DIR="$GAMEDIR/home"        # Z:\home\ (Documents\Klei\DoNotStarve
 export DS_CRT_DIR="$GAMEDIR/crt"
 export DS_AUDIO=sdl                       # FMOD events through the SDL mixer
 
+# the bigger-HUD mod (gamedata/mods/r36s-hud): enabled once; DS_BIG_HUD=0 leaves it alone
+MS=gamedata/mods/modsettings.lua
+if [ "${DS_BIG_HUD:-1}" != 0 ] && [ -d gamedata/mods/r36s-hud ] && ! grep -qs 'r36s-hud' "$MS"; then
+    echo 'ForceEnableMod("r36s-hud")' >> "$MS"
+fi
+
 if [ ! -f "$DS_HOME_DIR/.setups_imported" ] && [ -f tools/audio/import_setups.py ] && command -v python3 >/dev/null; then
     python3 -I tools/audio/import_setups.py && touch "$DS_HOME_DIR/.setups_imported"
 fi

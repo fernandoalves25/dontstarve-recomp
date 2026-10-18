@@ -121,6 +121,9 @@ What's in the runtime now ([src/runtime](src/runtime)):
 - **File I/O** ([ds_file.c](src/runtime/ds_file.c)): `Z:\dontstarve\…` → `$DS_GAME_DIR` (default
   `gamedata/`: your install's `bin/`, `data/`, `mods/`), `Z:\home\…` → `$DS_HOME_DIR` (default
   `build/home/`). Case-insensitive, as on Windows. `DS_FILE_TRACE=1` logs every open.
+- **Bigger HUD for small screens** ([port/mods/r36s-hud](port/mods/r36s-hud)): a tiny mod that
+  scales the in-game HUD, map and hover/speech text 1.4× (configurable 1.0–1.5×) through the game's
+  own `GetHUDScale`; the PortMaster launcher enables it.
 - **DXT without S3TC:** the game's textures are DXT5/DXT1; on a GPU without S3TC (the R36S's
   Mali-G31) the bridge decodes them on the CPU and uploads RGBA4444 (`DS_SOFT_DXT=rgba8` for full
   precision, `DS_SOFT_DXT=1` forces it; checked against the GPU path: max error 21/255). On aarch64
@@ -322,6 +325,9 @@ O que já existe no runtime ([src/runtime](src/runtime)):
   (padrão `gamedata/`: o `bin/`, `data/` e `mods/` da sua instalação), `Z:\home\…` →
   `$DS_HOME_DIR` (padrão `build/home/`). Sem diferenciar maiúsculas, como no Windows.
   `DS_FILE_TRACE=1` registra cada abertura.
+- **HUD maior para telas pequenas** ([port/mods/r36s-hud](port/mods/r36s-hud)): um mod pequeno que
+  aumenta o HUD do jogo, o mapa e os textos de hover/fala 1,4× (configurável 1,0–1,5×) pelo próprio
+  `GetHUDScale` do jogo; o lançador do PortMaster o habilita.
 - **DXT sem S3TC:** as texturas do jogo são DXT5/DXT1; numa GPU sem S3TC (a Mali-G31 do R36S) a
   ponte as decodifica na CPU e envia RGBA4444 (`DS_SOFT_DXT=rgba8` para precisão total,
   `DS_SOFT_DXT=1` força; conferido contra o caminho da GPU: erro máximo 21/255). No aarch64 as

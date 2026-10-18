@@ -4,6 +4,7 @@
 #   dontstarve/dontstarve_host.aarch64 the aarch64 build (scripts/build_arm64.sh link)
 #   dontstarve/tools/audio/            fsb5.py + import_setups.py (low-rate Vorbis setups)
 #   dontstarve/port.json, README.md    PortMaster metadata and what to copy where
+#   dontstarve/gamedata/mods/r36s-hud  a small mod: the HUD 1.4x larger (port/mods/)
 # No game material goes in: the player copies their own DRM-free install
 # (bin/dontstarve.exe, data/, mods/) to dontstarve/gamedata/ and the VC9 x86
 # runtime DLLs to dontstarve/crt/ -- the README in the zip says how.
@@ -17,5 +18,6 @@ cp "$BIN" "$OUT/dontstarve/"
 aarch64-linux-gnu-strip "$OUT/dontstarve/dontstarve_host.aarch64" 2>/dev/null || true
 cp tools/audio/fsb5.py tools/audio/import_setups.py "$OUT/dontstarve/tools/audio/"
 cp port/port.json port/README.md "$OUT/dontstarve/"
+mkdir -p "$OUT/dontstarve/gamedata/mods" && cp -r port/mods/r36s-hud "$OUT/dontstarve/gamedata/mods/"   # bigger HUD
 ( cd "$OUT" && rm -f dontstarve-recomp.zip && zip -qr dontstarve-recomp.zip dontstarve.sh dontstarve )
 ls -la "$OUT/dontstarve-recomp.zip"

@@ -29,6 +29,15 @@ needs an internet connection once). Without it, run that script on a PC with
 `DS_GAME_DIR` and `DS_HOME_DIR` pointing at your copied `gamedata/` and
 `home/` folders.
 
+## Bigger HUD
+
+A small mod in `gamedata/mods/r36s-hud` makes the in-game HUD (inventory,
+status, crafting tabs, map) and the hover/speech text 1.4x larger. The
+launcher enables it; the first time, the game shows a "Mods Installed" notice:
+pick "I understand". Change the size in Mods → Bigger HUD → Configure
+(1.0x–1.5x; 1.5x is the most a 640x480 screen fits), together with the game's
+own Options → HUD Size. To turn it off: Mods menu, or `DS_BIG_HUD=0`.
+
 ## Controls
 
 The device's buttons act as an Xbox pad, which Don't Starve supports out of
@@ -67,6 +76,15 @@ de setup Vorbis dos sons de taxa baixa (`tools/audio/import_setups.py`,
 precisa de internet uma vez). Sem ele, rode esse script num PC com
 `DS_GAME_DIR` e `DS_HOME_DIR` apontando para as pastas `gamedata/` e `home/`
 copiadas.
+
+## HUD maior
+
+Um mod pequeno em `gamedata/mods/r36s-hud` deixa o HUD do jogo (inventário,
+status, abas de criação, mapa) e os textos de hover/fala 1,4x maiores. O
+lançador o habilita; na primeira vez o jogo mostra o aviso "Mods Installed":
+escolha "I understand". Mude o tamanho em Mods → Bigger HUD → Configure
+(1,0x–1,5x; 1,5x é o máximo que cabe numa tela 640x480), junto com o
+Options → HUD Size do próprio jogo. Para desligar: menu Mods, ou `DS_BIG_HUD=0`.
 
 ## Controles
 
