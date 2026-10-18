@@ -39,6 +39,7 @@ uint32_t  g_icall_trace[ICALL_TRACE_SIZE], g_icall_from[ICALL_TRACE_SIZE];
 uint32_t  g_icall_trace_idx, g_icall_count;
 
 int ds_trace;
+int g_ds_screen_w = 640, g_ds_screen_h = 480;
 
 /* ============================================================ runtime coverage
  * Built with -DRECOMP_TRACE (COVERAGE=1), every lifted function calls
@@ -159,11 +160,30 @@ typedef struct { int kind; void *obj; } handle_slot;
 static handle_slot g_handles[MAX_HANDLES];
 static int g_handle_n = 1;   /* token 0 is reserved (NULL/invalid) */
 
+/* Freed slots are reused (CloseHandle/FindClose): the game opens thousands of
+ * files and sync objects while it loads. */
+static uint32_t g_handle_free[MAX_HANDLES];
+static int g_handle_free_n;
 uint32_t ds_handle_new(int kind, void *obj) {
-    if (g_handle_n >= MAX_HANDLES) ds_fatal("handle table full");
-    g_handles[g_handle_n].kind = kind;
-    g_handles[g_handle_n].obj = obj;
-    return (uint32_t)g_handle_n++;
+    uint32_t t;
+    if (g_handle_free_n > 0) t = g_handle_free[--g_handle_free_n];
+    else {
+        if (g_handle_n >= MAX_HANDLES) {
+            int cnt[64] = {0};
+            for (int i = 1; i < g_handle_n; i++) cnt[g_handles[i].kind & 63]++;
+            for (int k = 0; k < 64; k++) if (cnt[k]) fprintf(stderr, "[ds] handles of kind 0x%02X: %d\n", k, cnt[k]);
+            ds_fatal("handle table full");
+        }
+        t = (uint32_t)g_handle_n++;
+    }
+    g_handles[t].kind = kind;
+    g_handles[t].obj = obj;
+    return t;
+}
+void ds_handle_free(uint32_t t) {
+    if (t == 0 || t >= (uint32_t)g_handle_n || g_handles[t].kind == 0) return;
+    g_handles[t].kind = 0; g_handles[t].obj = NULL;
+    g_handle_free[g_handle_free_n++] = t;
 }
 void *ds_handle_get(uint32_t t, int kind) {
     if (t == 0 || t >= (uint32_t)g_handle_n) return NULL;
@@ -629,6 +649,7 @@ int main(int argc, char **argv) {
     }
     if (!exe) exe = "work/dontstarve.exe";
     if (getenv("DS_HLE_TRACE")) ds_trace = 1;
+    if (getenv("DS_SCREEN")) sscanf(getenv("DS_SCREEN"), "%dx%d", &g_ds_screen_w, &g_ds_screen_h);
     g_permissive = permissive;
 
     fprintf(stderr, "=== Don't Starve recompiled - arena host (64-bit) ===\n");

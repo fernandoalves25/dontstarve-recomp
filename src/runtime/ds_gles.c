@@ -9,7 +9,8 @@
  *    put an SDL2/KMSDRM surface here),
  *  - the game's window surface is a DS_SCREEN_W x DS_SCREEN_H pbuffer,
  *  - EGLDisplay/EGLConfig/EGLSurface/EGLContext are opaque guest tokens.
- * DS_DUMP_FRAMES=N writes every Nth swapped frame to build/frames/*.ppm.
+ * DS_DUMP_FRAMES=N writes every Nth swapped frame to build/frames/*.ppm;
+ * DS_EXIT_AFTER_FRAMES=N exits cleanly after N frames (coverage, CI).
  *
  * Ordinals come from the export tables of the game's own libEGL.dll and
  * libGLESv2.dll. GL_APIENTRY/EGLAPIENTRY are __stdcall: RET pops the args.
@@ -146,7 +147,8 @@ static void sh_eglMakeCurrent(void) {            /* (dpy, draw, read, ctx) */
 
 static uint32_t g_frame;
 static void dump_frame(uint32_t n) {
-    static uint8_t px[DS_SCREEN_W * DS_SCREEN_H * 4];
+    static uint8_t *px;
+    if (!px) px = (uint8_t *)malloc((size_t)DS_SCREEN_W * DS_SCREEN_H * 4);
     glReadPixels(0, 0, DS_SCREEN_W, DS_SCREEN_H, GL_RGBA, GL_UNSIGNED_BYTE, px);
     mkdir("build/frames", 0755);
     char path[64]; snprintf(path, sizeof path, "build/frames/frame_%05u.ppm", n);
@@ -165,6 +167,12 @@ static void sh_eglSwapBuffers(void) {            /* (dpy, surface) */
     g_frame++;
     if (every > 0 && g_frame % (uint32_t)every == 0) dump_frame(g_frame);
     EGLBoolean ok = s ? eglSwapBuffers(g_dpy, s) : EGL_FALSE;
+    static int exit_after = -1;
+    if (exit_after < 0) { const char *e = getenv("DS_EXIT_AFTER_FRAMES"); exit_after = e ? atoi(e) : 0; }
+    if (exit_after > 0 && g_frame >= (uint32_t)exit_after) {
+        fprintf(stderr, "[egl] DS_EXIT_AFTER_FRAMES=%d reached: exiting\n", exit_after);
+        exit(0);                                 /* atexit writes the coverage */
+    }
     if (g_frame == 1 || g_frame % 120 == 0) {
         struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
         double sec = (double)(t.tv_sec - t0.tv_sec) + (double)(t.tv_nsec - t0.tv_nsec) / 1e9;
@@ -256,16 +264,48 @@ static void sh_glPixelStorei(void)          { glPixelStorei(E(0), I(1)); RETV(2)
 static void sh_glPolygonOffset(void)        { glPolygonOffset(AF(0), AF(1)); RETV(2); }
 static void sh_glRenderbufferStorage(void)  { glRenderbufferStorage(E(0), E(1), I(2), I(3)); RETV(4); }
 static void sh_glScissor(void)              { glScissor(I(0), I(1), I(2), I(3)); RETV(4); }
+/* ANGLE accepts `#extension` anywhere; GLSL ES (Mesa, and the Mali driver)
+ * wants every one before any other code. The game's shaders are assembled
+ * from includes, so their #extension lines land mid-file: hoist them to the
+ * top (after #version), leaving a blank line in place. */
+static char *hoist_extensions(const char *src) {
+    size_t n = strlen(src);
+    char *ext = (char *)malloc(n + 1), *body = (char *)malloc(n + 1), *ver = (char *)malloc(n + 1);
+    size_t ne = 0, nb = 0, nv = 0;
+    for (const char *p = src; *p; ) {
+        const char *e = strchr(p, '\n'); size_t len = e ? (size_t)(e - p + 1) : strlen(p);
+        const char *q = p; while (q < p + len && (*q == ' ' || *q == '\t')) q++;
+        if (!strncmp(q, "#extension", 10)) { memcpy(ext + ne, p, len); ne += len; if (!e) ext[ne++] = '\n'; body[nb++] = '\n'; }
+        else if (!strncmp(q, "#version", 8) && nb == 0 && nv == 0) { memcpy(ver + nv, p, len); nv += len; }
+        else { memcpy(body + nb, p, len); nb += len; }
+        p += len;
+    }
+    char *out = (char *)malloc(nv + ne + nb + 1);
+    memcpy(out, ver, nv); memcpy(out + nv, ext, ne); memcpy(out + nv + ne, body, nb); out[nv + ne + nb] = 0;
+    free(ext); free(body); free(ver);
+    return out;
+}
 static void sh_glShaderSource(void) {       /* (shader, count, const char *const *strings, const GLint *lengths) */
     GLsizei n = I(1);
-    const GLchar *str[64]; GLint len[64];
-    if (n > 64) n = 64;
+    size_t total = 0;
     for (GLsizei i = 0; i < n; i++) {
         uint32_t sva = MEM32(A32(2) + 4u * (uint32_t)i);
-        str[i] = (const GLchar *)(sva ? ds_hostptr(sva) : "");
-        len[i] = A32(3) ? (GLint)MEM32(A32(3) + 4u * (uint32_t)i) : -1;
+        GLint len = A32(3) ? (GLint)MEM32(A32(3) + 4u * (uint32_t)i) : -1;
+        total += sva ? (len < 0 ? strlen((const char *)ds_hostptr(sva)) : (size_t)len) : 0;
     }
-    glShaderSource(U(0), n, str, len);
+    char *joined = (char *)malloc(total + 1); size_t at = 0;
+    for (GLsizei i = 0; i < n; i++) {
+        uint32_t sva = MEM32(A32(2) + 4u * (uint32_t)i);
+        GLint len = A32(3) ? (GLint)MEM32(A32(3) + 4u * (uint32_t)i) : -1;
+        if (!sva) continue;
+        size_t l = len < 0 ? strlen((const char *)ds_hostptr(sva)) : (size_t)len;
+        memcpy(joined + at, ds_hostptr(sva), l); at += l;
+    }
+    joined[at] = 0;
+    char *src = hoist_extensions(joined);
+    const GLchar *one = src;
+    glShaderSource(U(0), 1, &one, NULL);
+    free(src); free(joined);
     RETV(4);
 }
 static void sh_glStencilFunc(void)          { glStencilFunc(E(0), I(1), U(2)); RETV(3); }
@@ -292,7 +332,11 @@ static void sh_glVertexAttribPointer(void) {/* (index, size, type, normalized, s
     glVertexAttribPointer(U(0), I(1), E(2), (GLboolean)A32(3), I(4), ptr);
     RETV(6);
 }
-static void sh_glViewport(void)             { glViewport(I(0), I(1), I(2), I(3)); RETV(4); }
+static void sh_glViewport(void) {
+    static int logged;
+    if (logged < 4 && (I(2) != DS_SCREEN_W || I(3) != DS_SCREEN_H)) { logged++; fprintf(stderr, "[gl] glViewport(%d, %d, %d, %d)\n", I(0), I(1), I(2), I(3)); }
+    glViewport(I(0), I(1), I(2), I(3)); RETV(4);
+}
 
 /* name + "dll#ordinal" (ordinals from the game's own ANGLE DLLs' export tables) */
 #define EGL(ord, name)  { #name, sh_##name }, { "libEGL.dll#" #ord, sh_##name }

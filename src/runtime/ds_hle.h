@@ -21,9 +21,11 @@
 #include <stddef.h>
 #include "recomp_types.h"   /* g_eax, g_esp, MEM32, ADDR, recomp_func_t, dispatch */
 
-/* the one screen: the R36S panel (window client rect, EGL surface) */
-#define DS_SCREEN_W 640
-#define DS_SCREEN_H 480
+/* the one screen (window client rect, EGL surface): the R36S panel, 640x480,
+ * unless DS_SCREEN=WxH says otherwise (set once at startup, ds_host.c) */
+extern int g_ds_screen_w, g_ds_screen_h;
+#define DS_SCREEN_W g_ds_screen_w
+#define DS_SCREEN_H g_ds_screen_h
 
 /* ---- stdcall argument access (arena-aware) ---- */
 #define A32(i)   ((uint32_t)MEM32(g_esp + 4u + 4u * (uint32_t)(i)))
@@ -47,6 +49,7 @@ void     ds_arena_reset_to(uint32_t va);                  /* rare: rewind bump p
 uint32_t ds_handle_new(int kind, void *host_obj);         /* token >= 0x1 */
 void    *ds_handle_get(uint32_t token, int kind);         /* NULL if wrong kind/unknown */
 int      ds_handle_kind(uint32_t token);
+void     ds_handle_free(uint32_t token);                  /* CloseHandle: the slot is reused */
 
 /* handle kinds shared by the shim modules (ds_user32.c uses 0x20 and up) */
 enum { HK_HEAP = 1, HK_MODULE, HK_FILE /* std handle */, HK_MUTEX, HK_EVENT, HK_THREAD,

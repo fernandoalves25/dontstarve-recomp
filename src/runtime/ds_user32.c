@@ -304,7 +304,7 @@ static void sh_GetUserObjectInformationW(void) { /* (h, nIndex, pvInfo, nLength,
 }
 
 /* ===================== cursor, icons, keyboard */
-static int32_t g_cur_x = DS_SCREEN_W / 2, g_cur_y = DS_SCREEN_H / 2;
+static int32_t g_cur_x = -1, g_cur_y = -1;   /* screen centre until SetCursorPos */
 static uint32_t g_cursor;
 static void sh_LoadCursorA(void) { RET(ds_handle_new(HK_CURSOR, 0), 2); }
 static void sh_LoadIconA(void)   { RET(ds_handle_new(HK_ICON, 0), 2); }
@@ -312,6 +312,7 @@ static void sh_SetCursor(void)   { uint32_t old = g_cursor; g_cursor = A32(0); R
 static void sh_ClipCursor(void)  { RET(1, 1); }
 static void sh_GetCursorPos(void) {
     uint32_t p = A32(0);
+    if (g_cur_x < 0) { g_cur_x = DS_SCREEN_W / 2; g_cur_y = DS_SCREEN_H / 2; }
     if (p) { MEM32(p) = (uint32_t)g_cur_x; MEM32(p + 4) = (uint32_t)g_cur_y; }
     RET(1, 1);
 }

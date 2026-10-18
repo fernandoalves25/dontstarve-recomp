@@ -43,8 +43,8 @@ and the PC UI.
 **How much of the game actually runs.** Every function is already *lifted* to C — that's the
 easy part. What matters is how many have **executed** natively without crashing. Each cell ≈ 16
 functions: **bright = ran at runtime**, dim = lifted but never reached yet. Today execution runs
-through the CRT startup and the game's own init, creates the game window and a real GLES2 context,
-and stops at the first FMOD (audio) call. The map
+through the CRT startup and the game's own init, runs the game's Lua scripts and **draws the main menu**
+(Play / Mods / Options / Exit) at 640×480, in the main loop. The map
 fills in as the port progresses (measured with a `COVERAGE=1` build, see `scripts/coverage_counts.py`).
 
 ![progress map](docs/progress-en.svg)
@@ -59,50 +59,51 @@ fills in as the port progresses (measured with a `COVERAGE=1` build, see `script
 | M3 Compiles + links (exe + 2 lifted CRT DLLs) | ✅ done |
 | M4 Arena host, IAT binding (955/955), CRT `DllMain` runs | ✅ done |
 | M5 CRT initialization — both CRT `DllMain`s + exe CRT startup, game `main()` runs | ✅ done |
-| **M6 Native main menu** | 🟡 **in progress — window + EGL/GLES2 bridge done; FMOD (silent) next** |
-| M7 Stability | ⬜ |
+| M6 Native main menu — the recompiled game draws its menu (headless x86-64 + Mesa) | ✅ done |
+| **M7 Stability** | 🟡 **in progress — into a world: input, then the simulation** |
 | M8 Audio (FMOD Ex shim) | ⬜ |
 | M9 PortMaster package + FPS vs box64 | ⬜ |
 
 ### 🙋 Where help is needed
 
-**Current wall: `FMOD_EventSystem_Create`, the first audio call.** The port lifts the game's
-**DRM-free standalone build** (`dontstarve.exe`, 16,146 functions, 0 lift failures); the Steam one
-won't start without a running Steam client. Execution reaches **1,335 functions (787 in the game
-exe)**. The game writes its own `log.txt`, probes its DLC/patch folders and settings, creates its
-`"opengles2.0"` window, brings up **EGL + GLES2 for real** (on the host's native driver, Mesa
-llvmpipe in CI-style headless runs), queries the GL texture formats, enumerates input devices,
-reaches `cDontStarveGame::DoGameSpecificInitialize()` and creates the FMOD event system.
+**Milestone M6: the main menu runs natively.** The recompiled `dontstarve.exe` (the DRM-free
+standalone build; 16,146 functions, 0 lift failures) boots through the CRT, creates its window,
+brings up EGL + GLES2, initializes (silent) FMOD, runs its Lua scripts (`main.lua`, player profile,
+mod index, prefabs, shaders) and sits in its main loop **drawing the main menu** at 640×480 — about
+50 fps on the Mesa llvmpipe *software* renderer of a headless x86-64 container. **3,370 functions
+executed (2,745 in the game exe)**. Next: input into the menu, then a world (M7), the aarch64 build
+for the R36S (M9), and real audio (M8).
 
 What's in the runtime now ([src/runtime](src/runtime)):
 
 - **EGL/GLES2 bridge** ([ds_gles.c](src/runtime/ds_gles.c)): the 9 EGL + 76 GLES2 ANGLE imports
-  (by ordinal, mapped from the game's own `libEGL.dll`/`libGLESv2.dll` export tables) straight onto
-  native EGL/GLES2. Headless for now: a 640×480 pbuffer on `EGL_PLATFORM_SURFACELESS_MESA`;
-  `DS_DUMP_FRAMES=N` saves every Nth frame to `build/frames/`. The R36S build puts an SDL2/KMSDRM
-  surface on the Mali GPU in its place.
-- **USER32 + GDI32** ([ds_user32.c](src/runtime/ds_user32.c)): a headless fake window, one fixed
-  640×480 client rect (the R36S screen), one display mode and monitor, an empty message queue.
-- **File I/O** ([ds_file.c](src/runtime/ds_file.c)): the guest's `Z:\dontstarve\…` maps to
-  `$DS_GAME_DIR` (default `gamedata/`: your install's `bin/` and `data/`), `Z:\home\…` to
-  `$DS_HOME_DIR` (default `build/home/`: saves, `log.txt`). Lookups are case-insensitive, as on
-  Windows. `DS_FILE_TRACE=1` logs every open.
-- **Threads** ([ds_thread.c](src/runtime/ds_thread.c)): real host threads. The machine lock is
-  released around blocking calls, and threads, mutexes and semaphores are real waitable objects.
-- **Input** ([ds_input.c](src/runtime/ds_input.c)): XInput reports no pad; DirectInput 8 is a COM
-  interface with no devices (the game calls it without checking the create result).
-- **Offline Winsock** ([ds_net.c](src/runtime/ds_net.c)): `WSAStartup` works, but no socket or
-  name lookup succeeds.
-- **Lifter:** patch [0016](patches/pcrecomp) adds the x87 `fcomi`/`fucomi[p]` compares (3,835
-  sites in the exe that lifted to `RECOMP_UNIMPL` because Capstone spells them `fcompi`/`fucompi`),
-  with their real EFLAGS (NaN included). pcrecomp's `difftest` matches hardware on 263/263 cases.
+  (by ordinal, mapped from the game's own `libEGL.dll`/`libGLESv2.dll`) onto native EGL/GLES2.
+  `#extension` lines are hoisted to the top of each shader (ANGLE accepted them mid-file). Headless:
+  a pbuffer on `EGL_PLATFORM_SURFACELESS_MESA`. `DS_DUMP_FRAMES=N` saves frames,
+  `DS_EXIT_AFTER_FRAMES=N` exits cleanly, `DS_SCREEN=WxH` changes the 640×480 screen.
+- **FMOD Ex + Event, silent** ([ds_fmod.c](src/runtime/ds_fmod.c)): every object exists, every call
+  succeeds. The virtual `EventProject`/`EventCategory`/`EventGroup` vtables come from the game's own
+  `fmod_event.dll` (slot order and stack size per method).
+- **USER32 + GDI32** ([ds_user32.c](src/runtime/ds_user32.c)): a headless window, one display mode
+  and monitor. On first run the host writes a `settings.ini` for full screen at the panel size.
+- **File I/O** ([ds_file.c](src/runtime/ds_file.c)): `Z:\dontstarve\…` → `$DS_GAME_DIR` (default
+  `gamedata/`: your install's `bin/`, `data/`, `mods/`), `Z:\home\…` → `$DS_HOME_DIR` (default
+  `build/home/`). Case-insensitive, as on Windows. `DS_FILE_TRACE=1` logs every open.
+- **Threads** ([ds_thread.c](src/runtime/ds_thread.c)), **input** ([ds_input.c](src/runtime/ds_input.c):
+  no pad yet; DirectInput with no devices), **offline Winsock** ([ds_net.c](src/runtime/ds_net.c)).
+- **Lifter / runtime patches** ([patches/pcrecomp](patches/pcrecomp)): 0016 adds the x87
+  `fcomi`/`fucomi[p]` compares (3,835 sites); 0017 gives the guest **real `setjmp`/`longjmp`**
+  (`RECOMP_HOST_SETJMP`), so Lua's `pcall`/`error` unwinds the host C frames. pcrecomp's `difftest`
+  matches hardware on 263/263 cases.
+- **Debugging:** `DS_WATCH=va,…` prints a lifted function's arguments on entry (how a Lua error
+  without a message got its message back); `DS_SENTINEL=1` catches return-address leaks.
 
 Help wanted, in order:
 
-- **FMOD Ex + FMOD Event shim** (21 + 24 imports, C API and stdcall C++ methods): a silent
-  bring-up first (valid handles, no sound), then a real backend (SDL audio, FSB banks).
-- **SDL2/KMSDRM** behind the window and the EGL surface, SDL events → the message queue, and
-  SDL GameController → XInput for the R36S buttons.
+- **SDL2 backend** for the R36S: an SDL2/KMSDRM window and EGL surface on the Mali GPU, SDL events
+  into the message queue, SDL GameController → XInput for the buttons.
+- **aarch64 build** (glibc ≤ 2.30, as for the ArkOS image) and FPS against box64.
+- **FMOD Ex + Event with sound:** SDL audio, FSB banks.
 
 Runtime fixes on the way (useful for anyone using pcrecomp): import-stub names were dangling
 pointers (`GetProcAddress` stack buffers and ordinal names like `OLEAUT32.dll#9`), so a missing
@@ -185,7 +186,7 @@ tudo que o port Android perde: todas as DLCs (RoG, Shipwrecked, Hamlet), **mods*
 **Quanto do jogo realmente roda.** Todas as funções já estão *liftadas* para C — essa é a parte
 fácil. O que importa é quantas já **executaram** nativamente sem crashar. Cada célula ≈ 16 funções:
 **clara = rodou em runtime**, escura = liftada mas ainda não alcançada. Hoje a execução passa pelo
-startup do CRT e pela inicialização do jogo, cria a janela do jogo e um contexto GLES2 de verdade, e para na primeira chamada ao FMOD (áudio). O mapa
+startup do CRT e pela inicialização do jogo, roda os scripts Lua do jogo e **desenha o menu principal** (Play / Mods / Options / Exit) em 640×480, no loop principal. O mapa
 vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, veja `scripts/coverage_counts.py`).
 
 ![mapa de progresso](docs/progress-pt.svg)
@@ -200,53 +201,54 @@ vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, ve
 | M3 Compila + linka (exe + 2 DLLs do CRT liftadas) | ✅ feito |
 | M4 Host arena, bind da IAT (955/955), `DllMain` do CRT roda | ✅ feito |
 | M5 Inicialização do CRT — `DllMain` dos 2 CRTs + startup do exe, `main()` do jogo roda | ✅ feito |
-| **M6 Menu principal nativo** | 🟡 **em progresso — janela + ponte EGL/GLES2 prontas; FMOD (mudo) a seguir** |
-| M7 Estabilidade | ⬜ |
+| M6 Menu principal nativo — o jogo recompilado desenha o menu (headless x86-64 + Mesa) | ✅ feito |
+| **M7 Estabilidade** | 🟡 **em progresso — entrar num mundo: input, depois a simulação** |
 | M8 Áudio (shim do FMOD Ex) | ⬜ |
 | M9 Pacote PortMaster + FPS vs box64 | ⬜ |
 
 ### 🙋 Onde precisamos de ajuda
 
-**Parede atual: `FMOD_EventSystem_Create`, a primeira chamada de áudio.** O port lifta o **build
-standalone DRM-free** do jogo (`dontstarve.exe`, 16.146 funções, 0 falhas de lift); o build Steam
-não inicia sem o cliente da Steam rodando. A execução chega a **1.335 funções (787 no exe do
-jogo)**. O jogo escreve o próprio `log.txt`, procura as pastas de DLC/patch e as configurações,
-cria a janela `"opengles2.0"`, sobe **EGL + GLES2 de verdade** (no driver nativo do host; Mesa
-llvmpipe nos testes headless), consulta os formatos de textura do GL, enumera os dispositivos de
-input, chega ao `cDontStarveGame::DoGameSpecificInitialize()` e cria o event system do FMOD.
+**Marco M6: o menu principal roda nativo.** O `dontstarve.exe` recompilado (o build standalone
+DRM-free; 16.146 funções, 0 falhas de lift) passa pelo CRT, cria a janela, sobe EGL + GLES2,
+inicializa o FMOD (mudo), roda os scripts Lua (`main.lua`, perfil do jogador, índice de mods,
+prefabs, shaders) e fica no loop principal **desenhando o menu principal** em 640×480 — cerca de
+50 fps no renderizador *por software* Mesa llvmpipe, num container x86-64 headless. **3.370 funções
+executadas (2.745 no exe do jogo)**. Próximos passos: input no menu, depois um mundo (M7), o build
+aarch64 para o R36S (M9) e áudio de verdade (M8).
 
 O que já existe no runtime ([src/runtime](src/runtime)):
 
 - **Ponte EGL/GLES2** ([ds_gles.c](src/runtime/ds_gles.c)): os 9 imports EGL + 76 GLES2 do ANGLE
-  (por ordinal, mapeados a partir das tabelas de export do `libEGL.dll`/`libGLESv2.dll` do próprio
-  jogo) direto para EGL/GLES2 nativo. Por enquanto headless: um pbuffer de 640×480 em
-  `EGL_PLATFORM_SURFACELESS_MESA`; `DS_DUMP_FRAMES=N` salva cada N-ésimo frame em `build/frames/`.
-  No R36S entra uma superfície SDL2/KMSDRM na GPU Mali no lugar.
-- **USER32 + GDI32** ([ds_user32.c](src/runtime/ds_user32.c)): uma janela falsa headless, um
-  retângulo cliente fixo de 640×480 (a tela do R36S), um modo de vídeo e um monitor, fila de
-  mensagens vazia.
-- **I/O de arquivos** ([ds_file.c](src/runtime/ds_file.c)): o `Z:\dontstarve\…` do guest vira
-  `$DS_GAME_DIR` (padrão `gamedata/`: o `bin/` e o `data/` da sua instalação), e `Z:\home\…` vira
-  `$DS_HOME_DIR` (padrão `build/home/`: saves, `log.txt`). A busca ignora maiúsculas/minúsculas,
-  como no Windows. `DS_FILE_TRACE=1` registra cada abertura.
-- **Threads** ([ds_thread.c](src/runtime/ds_thread.c)): threads reais do host. A trava da
-  máquina é liberada nas chamadas que bloqueiam, e threads, mutexes e semáforos são objetos de
-  espera de verdade.
-- **Input** ([ds_input.c](src/runtime/ds_input.c)): o XInput responde que não há controle; o
-  DirectInput 8 é uma interface COM sem dispositivos (o jogo a usa sem checar o resultado).
-- **Winsock offline** ([ds_net.c](src/runtime/ds_net.c)): o `WSAStartup` funciona, mas nenhum
-  socket ou resolução de nome dá certo.
-- **Lifter:** o patch [0016](patches/pcrecomp) adiciona as comparações x87 `fcomi`/`fucomi[p]`
-  (3.835 pontos no exe que viravam `RECOMP_UNIMPL` porque o Capstone as chama de
-  `fcompi`/`fucompi`), com os EFLAGS reais (NaN incluído). O `difftest` do pcrecomp bate com o
-  hardware em 263/263 casos.
+  (por ordinal, mapeados a partir do `libEGL.dll`/`libGLESv2.dll` do próprio jogo) para EGL/GLES2
+  nativo. As linhas `#extension` sobem para o topo de cada shader (o ANGLE aceitava no meio).
+  Headless: um pbuffer em `EGL_PLATFORM_SURFACELESS_MESA`. `DS_DUMP_FRAMES=N` salva frames,
+  `DS_EXIT_AFTER_FRAMES=N` sai de forma limpa, `DS_SCREEN=LxA` muda a tela de 640×480.
+- **FMOD Ex + Event, mudo** ([ds_fmod.c](src/runtime/ds_fmod.c)): todo objeto existe, toda chamada
+  dá certo. As vtables virtuais de `EventProject`/`EventCategory`/`EventGroup` vêm do
+  `fmod_event.dll` do próprio jogo (ordem dos slots e tamanho da pilha de cada método).
+- **USER32 + GDI32** ([ds_user32.c](src/runtime/ds_user32.c)): uma janela headless, um modo de
+  vídeo e um monitor. Na primeira execução o host grava um `settings.ini` em tela cheia no tamanho
+  do painel.
+- **I/O de arquivos** ([ds_file.c](src/runtime/ds_file.c)): `Z:\dontstarve\…` → `$DS_GAME_DIR`
+  (padrão `gamedata/`: o `bin/`, `data/` e `mods/` da sua instalação), `Z:\home\…` →
+  `$DS_HOME_DIR` (padrão `build/home/`). Sem diferenciar maiúsculas, como no Windows.
+  `DS_FILE_TRACE=1` registra cada abertura.
+- **Threads** ([ds_thread.c](src/runtime/ds_thread.c)), **input** ([ds_input.c](src/runtime/ds_input.c):
+  ainda sem controle; DirectInput sem dispositivos), **Winsock offline** ([ds_net.c](src/runtime/ds_net.c)).
+- **Patches do lifter / runtime** ([patches/pcrecomp](patches/pcrecomp)): o 0016 adiciona as
+  comparações x87 `fcomi`/`fucomi[p]` (3.835 pontos); o 0017 dá ao guest **`setjmp`/`longjmp` de
+  verdade** (`RECOMP_HOST_SETJMP`), então o `pcall`/`error` do Lua desfaz os frames C do host. O
+  `difftest` do pcrecomp bate com o hardware em 263/263 casos.
+- **Debug:** `DS_WATCH=va,…` imprime os argumentos de uma função liftada na entrada (foi assim que
+  um erro Lua sem mensagem recuperou a mensagem); `DS_SENTINEL=1` pega vazamento de endereço de
+  retorno.
 
 Procura-se ajuda, nesta ordem:
 
-- **Shim do FMOD Ex + FMOD Event** (21 + 24 imports, API C e métodos C++ stdcall): primeiro sem
-  som (handles válidos, nada toca), depois um backend real (áudio SDL, bancos FSB).
-- **SDL2/KMSDRM** por trás da janela e da superfície EGL, eventos SDL → fila de mensagens, e SDL
-  GameController → XInput para os botões do R36S.
+- **Backend SDL2** para o R36S: janela SDL2/KMSDRM e superfície EGL na GPU Mali, eventos SDL na
+  fila de mensagens, SDL GameController → XInput para os botões.
+- **Build aarch64** (glibc ≤ 2.30, como na imagem do ArkOS) e FPS comparado ao box64.
+- **FMOD Ex + Event com som:** áudio SDL, bancos FSB.
 
 Correções de runtime no caminho (úteis para quem usa o pcrecomp): os nomes dos stubs de import
 eram ponteiros pendurados (buffers de pilha do `GetProcAddress` e nomes por ordinal como
@@ -283,7 +285,8 @@ src/runtime/   arena host (ds_host.c), shim ABI (ds_hle.h), kernel32/CRT shims (
                platform shims: winmm, steam_api, COM, shell32 (ds_win32.c),
                USER32 + GDI32 headless window (ds_user32.c), file I/O (ds_file.c),
                threads + waitable objects (ds_thread.c), offline Winsock (ds_net.c),
-               EGL/GLES2 bridge (ds_gles.c), XInput + DirectInput8 (ds_input.c)
+               EGL/GLES2 bridge (ds_gles.c), XInput + DirectInput8 (ds_input.c),
+               FMOD Ex + Event, silent (ds_fmod.c)
 patches/       this repo's pcrecomp lifter fixes, applied on top of a847ef6
 config/        overrides.txt (native HLE of CRT EH helpers), hooks.txt
 ```
