@@ -17,6 +17,8 @@
 #include <pthread.h>
 #include <signal.h>
 #include <execinfo.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/mman.h>
 #include "ds_hle.h"
 #include "pe_format.h"
@@ -38,10 +40,40 @@ uint32_t  g_icall_trace_idx, g_icall_count;
 
 int ds_trace;
 
+/* ============================================================ runtime coverage
+ * Built with -DRECOMP_TRACE (COVERAGE=1), every lifted function calls
+ * recomp_trace_enter on entry. We keep the set of guest VAs that actually ran
+ * and dump it to build/executed_vas.txt (local, gitignored) on exit or crash.
+ * "Lifted" is ~100%; "executed" is the honest measure of how far the port runs. */
+#ifdef RECOMP_TRACE
+uint32_t g_enter_trace[RECOMP_ENTER_SIZE];
+uint32_t g_enter_idx;
+#define COV_CAP (1u << 17)
+static uint32_t g_cov[COV_CAP];
+static uint32_t g_cov_n;
+void recomp_trace_enter(uint32_t va) {
+    g_enter_trace[g_enter_idx++ & (RECOMP_ENTER_SIZE - 1)] = va;
+    uint32_t h = (va * 2654435761u) & (COV_CAP - 1);
+    while (g_cov[h]) { if (g_cov[h] == va) return; h = (h + 1) & (COV_CAP - 1); }
+    if (g_cov_n < COV_CAP / 2) { g_cov[h] = va; g_cov_n++; }
+}
+static void cov_dump(void) {
+    int fd = open("build/executed_vas.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return;
+    char b[16];
+    for (uint32_t i = 0; i < COV_CAP; i++)
+        if (g_cov[i]) { int n = snprintf(b, sizeof b, "%08X\n", g_cov[i]); if (write(fd, b, (size_t)n) < 0) break; }
+    close(fd);
+    fprintf(stderr, "[ds] coverage: %u distinct lifted functions executed -> build/executed_vas.txt\n", g_cov_n);
+}
+#else
+static void cov_dump(void) {}
+#endif
+
 void ds_fatal(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     fprintf(stderr, "[ds] FATAL: "); vfprintf(stderr, fmt, ap); fprintf(stderr, "\n");
-    va_end(ap); abort();
+    va_end(ap); cov_dump(); abort();
 }
 
 /* ============================================================ the arena
@@ -302,6 +334,7 @@ void recomp_unresolved(const char *kind, uint32_t va, uint32_t from) {
 }
 void recomp_unimpl(uint32_t va, const char *what) {
     fprintf(stderr, "[RECOMP_UNIMPL] 0x%08X: %s\n", va, what ? what : "?");
+    cov_dump();
     abort();
 }
 
@@ -461,6 +494,7 @@ static void crash_handler(int sig, siginfo_t *si, void *uc) {
             fprintf(stderr, "    0x%08X %-24s from 0x%08X\n", t, nm ? nm : "", g_icall_from[idx]);
         }
     }
+    cov_dump();
     _exit(139);
 }
 static void install_crash_handler(void) {
@@ -493,6 +527,7 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "=== Don't Starve recompiled - arena host (64-bit) ===\n");
     install_crash_handler();
+    atexit(cov_dump);
     if (!arena_init()) return 1;
 
     /* Map the exe and the lifted CRT DLLs into the arena at their ImageBases. */

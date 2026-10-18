@@ -35,35 +35,57 @@ def badge(label, value, color):
             f"<text x='{lw + vw/2}' y='14' text-anchor='middle'>{escape(value)}</text></g></svg>")
 
 
+RAN, NOTRUN = "#3fb950", "#2d333b"
+
+
+def num(n, lang):
+    return f"{n:,}".replace(",", "." if lang == "pt" else ",")
+
+
+def pct(a, b):
+    return 100.0 * a / b if b else 0.0
+
+
 def treemap(lang):
-    W, H, PAD, CELL, GAP, HEAD = 900, 330, 8, 9, 2, 34
+    """Per-module map of the lifted functions. A cell is bright only if some
+    function in it actually EXECUTED at runtime (coverage run); everything else
+    is lifted-but-not-yet-run. Lifting is ~100% - running is the real progress."""
+    W, H, PAD, CELL, GAP, TOP, HEAD = 900, 372, 8, 9, 2, 40, 34
     mods, per = S["modules"], S["per_cell"]
-    total = sum(m["lifted"] + m["pruned"] for m in mods)
+    lifted = sum(m["lifted"] for m in mods)
+    ran = sum(m.get("executed", 0) for m in mods)
     out = [f"<svg xmlns='http://www.w3.org/2000/svg' width='{W}' height='{H}' viewBox='0 0 {W} {H}'>",
            f"<rect width='{W}' height='{H}' rx='8' fill='{BG}'/>"]
+    head = ("executadas em runtime" if lang == "pt" else "executed at runtime")
+    out.append(f"<text x='{PAD+6}' y='27' {FONT} font-size='15' font-weight='700' fill='{FG}'>"
+               f"{head}: <tspan fill='{RAN}'>{num(ran, lang)}</tspan> / {num(lifted, lang)} "
+               f"<tspan fill='{MUTED}' font-weight='400'>({pct(ran, lifted):.2f}%)</tspan></text>")
+    lx = W - 380
+    out.append(f"<rect x='{lx}' y='16' width='10' height='10' rx='2' fill='{RAN}'/>"
+               f"<text x='{lx+15}' y='25' {FONT} font-size='11' fill='{MUTED}'>{'executou' if lang=='pt' else 'ran'}</text>"
+               f"<rect x='{lx+80}' y='16' width='10' height='10' rx='2' fill='{NOTRUN}' stroke='{BORDER}'/>"
+               f"<text x='{lx+95}' y='25' {FONT} font-size='11' fill='{MUTED}'>{'liftada, ainda não rodou' if lang=='pt' else 'lifted, not run yet'}</text>")
+    total = sum(len(m.get("cells", "")) or round(m["lifted"] / per) for m in mods)
     x = PAD
     avail = W - PAD * (len(mods) + 1)
     for m in mods:
-        n = m["lifted"] + m["pruned"]
-        w = max(150, avail * n / total)
+        cells = m.get("cells") or "0" * max(1, round((m["lifted"] + m["pruned"]) / per))
+        w = max(150, avail * len(cells) / total)
         if m is mods[-1]:
             w = W - PAD - x
-        h = H - 2 * PAD
-        out.append(f"<rect x='{x}' y='{PAD}' width='{w:.1f}' height='{h}' rx='6' fill='{PANEL}' stroke='{BORDER}'/>")
-        kind = m["kind_" + lang]
-        sub = f"{m['lifted']:,} fns".replace(",", "." if lang == "pt" else ",")
-        if m["pruned"]:
-            sub += f" · {m['pruned']} " + ("podadas" if lang == "pt" else "pruned")
-        out.append(f"<text x='{x+8}' y='{PAD+16}' {FONT} font-size='12' font-weight='600' fill='{FG}'>{escape(m['name'])}</text>")
-        out.append(f"<text x='{x+8}' y='{PAD+29}' {FONT} font-size='10.5' fill='{MUTED}'>{escape(kind)} · {escape(sub)}</text>")
+        y0, h = TOP, H - TOP - PAD
+        out.append(f"<rect x='{x:.1f}' y='{y0}' width='{w:.1f}' height='{h}' rx='6' fill='{PANEL}' stroke='{BORDER}'/>")
+        ex = m.get("executed", 0)
+        sub = f"{num(ex, lang)} / {num(m['lifted'], lang)} ({pct(ex, m['lifted']):.1f}%)"
+        out.append(f"<text x='{x+8}' y='{y0+16}' {FONT} font-size='12' font-weight='600' fill='{FG}'>{escape(m['name'])}</text>")
+        out.append(f"<text x='{x+8}' y='{y0+29}' {FONT} font-size='10.5' fill='{MUTED}'>{escape(m['kind_' + lang])} · {escape(sub)}</text>")
         cols = max(1, int((w - 16 + GAP) // (CELL + GAP)))
-        nl, np_ = max(1, round(m["lifted"] / per)), round(m["pruned"] / per)
-        for i in range(nl + np_):
+        for i, c in enumerate(cells):
             cx = x + 8 + (i % cols) * (CELL + GAP)
-            cy = PAD + HEAD + 6 + (i // cols) * (CELL + GAP)
-            if cy + CELL > PAD + h - 6:
+            cy = y0 + HEAD + 6 + (i // cols) * (CELL + GAP)
+            if cy + CELL > y0 + h - 6:
                 break
-            out.append(f"<rect x='{cx:.1f}' y='{cy}' width='{CELL}' height='{CELL}' rx='1.5' fill='{GRID if i < nl else PRUNED}'/>")
+            out.append(f"<rect x='{cx:.1f}' y='{cy}' width='{CELL}' height='{CELL}' rx='1.5' fill='{RAN if c == '1' else NOTRUN}'/>")
         x += w + PAD
     out.append("</svg>")
     return "".join(out)
@@ -89,7 +111,14 @@ def milestones(lang):
 
 
 fns = sum(m["lifted"] for m in S["modules"])
-write("badge-functions.svg", badge("functions lifted", f"{fns:,}", "#2ea043"))
+ran = sum(m.get("executed", 0) for m in S["modules"])
+p = pct(ran, fns)
+write("badge-functions.svg", badge("functions lifted", f"{fns:,}", "#0969da"))
+for lang in ("en", "pt"):
+    write(f"badge-executed-{lang}.svg",
+          badge("executadas em runtime" if lang == "pt" else "executed at runtime",
+                f"{p:.2f}%".replace(".", ",") if lang == "pt" else f"{p:.2f}%",
+                "#cf222e" if p < 5 else "#bf8700" if p < 50 else "#2ea043"))
 write("badge-failures.svg", badge("lift failures", str(S["lift_failures"]), "#2ea043" if S["lift_failures"] == 0 else "#d73a49"))
 write("badge-imports.svg", badge("imports", f"{S['imports_resolved']}/{S['imports_total']}", "#2ea043"))
 for lang in ("en", "pt"):

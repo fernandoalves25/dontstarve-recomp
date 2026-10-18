@@ -2,6 +2,7 @@
 
 **[English](#english) · [Português](#português)** · 📊 **[Live status dashboard](https://fernandoalves25.github.io/dontstarve-recomp/)**
 
+![executed at runtime](docs/badge-executed-en.svg)
 ![functions lifted](docs/badge-functions.svg)
 ![lift failures](docs/badge-failures.svg)
 ![imports](docs/badge-imports.svg)
@@ -39,7 +40,11 @@ and the PC UI.
 
 ### Status
 
-**Lift coverage by module** (each cell ≈ 16 functions; gray = data pruned from `.text`, never called):
+**How much of the game actually runs.** Every function is already *lifted* to C — that's the
+easy part. What matters is how many have **executed** natively without crashing. Each cell ≈ 16
+functions: **bright = ran at runtime**, dim = lifted but never reached yet. Today execution stops
+inside the CRT startup, before the game's own code — so almost everything is still dim. The map
+fills in as the port progresses (measured with a `COVERAGE=1` build, see `scripts/coverage_counts.py`).
 
 ![progress map](docs/progress-en.svg)
 
@@ -124,9 +129,14 @@ tudo que o port Android perde: todas as DLCs (RoG, Shipwrecked, Hamlet), **mods*
 
 ### Status
 
+![executadas em runtime](docs/badge-executed-pt.svg)
 ![fase](docs/badge-phase-pt.svg)
 
-**Cobertura de lift por módulo** (cada célula ≈ 16 funções; cinza = dados podados do `.text`, nunca chamados):
+**Quanto do jogo realmente roda.** Todas as funções já estão *liftadas* para C — essa é a parte
+fácil. O que importa é quantas já **executaram** nativamente sem crashar. Cada célula ≈ 16 funções:
+**clara = rodou em runtime**, escura = liftada mas ainda não alcançada. Hoje a execução para dentro
+do startup do CRT, antes do código do próprio jogo — por isso quase tudo ainda está escuro. O mapa
+vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, veja `scripts/coverage_counts.py`).
 
 ![mapa de progresso](docs/progress-pt.svg)
 

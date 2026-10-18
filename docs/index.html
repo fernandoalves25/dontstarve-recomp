@@ -33,8 +33,8 @@
   .mod{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px;flex:1 1 220px;min-width:0}
   .mod h3{margin:0 0 2px;font-size:14px;word-break:break-all} .mod .c{color:var(--muted);font-size:12px;margin-bottom:8px}
   .cells{display:grid;grid-template-columns:repeat(auto-fill,10px);gap:2px}
-  .cell{width:10px;height:10px;border-radius:2px;background:var(--grid)}
-  .cell.x{background:var(--pruned)}
+  .cell{width:10px;height:10px;border-radius:2px;background:#2d333b}
+  .cell.r{background:var(--green)}
   .legend{display:flex;flex-wrap:wrap;gap:16px;color:var(--muted);font-size:12px;margin-top:10px}
   .sw{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:5px}
   .mile{display:flex;flex-direction:column;gap:6px}
@@ -58,6 +58,7 @@
   </div>
 
   <div class="badges">
+    <div class="badge"><span class="k" data-i="bRan"></span><b id="b-ran" style="color:#ff7b72"></b></div>
     <div class="badge"><span class="k" data-i="bFns"></span><b id="b-fns"></b></div>
     <div class="badge"><span class="k" data-i="bFail"></span><b style="color:var(--green)">0</b></div>
     <div class="badge"><span class="k" data-i="bImp"></span><b>955 / 955</b></div>
@@ -67,8 +68,8 @@
   <h2 data-i="hLift"></h2>
   <div class="tmwrap" id="tm"></div>
   <div class="legend">
-    <span><span class="sw" style="background:var(--grid)"></span><span data-i="lgLift"></span></span>
-    <span><span class="sw" style="background:var(--pruned)"></span><span data-i="lgPrune"></span></span>
+    <span><span class="sw" style="background:var(--green)"></span><span data-i="lgLift"></span></span>
+    <span><span class="sw" style="background:#2d333b;outline:1px solid var(--border)"></span><span data-i="lgPrune"></span></span>
     <span data-i="lgCell"></span>
   </div>
 
@@ -86,10 +87,10 @@ const T = {
  en:{
   title:"Don't Starve — Native ARM64 recompilation for R36S",
   sub:"Static recompilation of the Windows EXE (x86-32) into native C99 via pcrecomp — no box64, no runtime emulation. Keeps all DLCs, mods, the PT-BR translation and the PC UI.",
-  bFns:"Functions lifted", bFail:"Lift failures", bImp:"Imports resolved", bPhase:"Phase",
+  bRan:"Executed at runtime", bFns:"Functions lifted", bFail:"Lift failures", bImp:"Imports resolved", bPhase:"Phase",
   phase:"CRT bring-up",
-  hLift:"Lift coverage — by module",
-  lgLift:"lifted (0 failures)", lgPrune:"pruned (data in .text, never called)", lgCell:"each cell ≈ a block of functions",
+  hLift:"How much actually runs — by module",
+  lgLift:"ran at runtime", lgPrune:"lifted, not run yet", lgCell:"each cell ≈ 16 functions — lifting is the easy part; running is the real progress",
   fns:"fns", pruned:"pruned",
   hMile:"Milestone progress",
   st:{ok:"done",work:"in progress",todo:"to do"},
@@ -111,10 +112,10 @@ const T = {
  pt:{
   title:"Don't Starve — Recompilação nativa ARM64 para R36S",
   sub:"Recompilação estática do EXE Windows (x86-32) para C99 nativo via pcrecomp — sem box64, sem emulação em runtime. Preserva todas as DLCs, mods, a tradução PT-BR e a UI de PC.",
-  bFns:"Funções liftadas", bFail:"Falhas de lift", bImp:"Imports resolvidos", bPhase:"Fase",
+  bRan:"Executadas em runtime", bFns:"Funções liftadas", bFail:"Falhas de lift", bImp:"Imports resolvidos", bPhase:"Fase",
   phase:"Bring-up do CRT",
-  hLift:"Cobertura de lift — por módulo",
-  lgLift:"liftado (0 falhas)", lgPrune:"podado (dados no .text, nunca chamado)", lgCell:"cada célula ≈ um bloco de funções",
+  hLift:"Quanto realmente roda — por módulo",
+  lgLift:"rodou em runtime", lgPrune:"liftada, ainda não rodou", lgCell:"cada célula ≈ 16 funções — liftar é a parte fácil; rodar é o progresso real",
   fns:"fns", pruned:"podadas",
   hMile:"Progresso dos marcos",
   st:{ok:"feito",work:"em progresso",todo:"a fazer"},
@@ -135,13 +136,12 @@ const T = {
  }
 };
 
-const MODS = [
-  {name:"dontstarve_steam.exe", kind:{en:"x86-32 EXE (VC9)",pt:"EXE x86-32 (VC9)"}, lifted:17033, pruned:0},
-  {name:"msvcr90.dll", kind:{en:"VC9 CRT (lifted)",pt:"CRT VC9 (liftado)"}, lifted:5300, pruned:231},
-  {name:"msvcp90.dll", kind:{en:"VC9 STL (lifted)",pt:"STL VC9 (liftado)"}, lifted:3407, pruned:152},
-];
+// Data comes from status.json (same source as the README images); inline fallback for file://.
+let DATA = {per_cell:16, modules:[
+  {name:"dontstarve_steam.exe", kind_en:"x86-32 EXE (VC9)", kind_pt:"EXE x86-32 (VC9)", lifted:17033, pruned:0, executed:0},
+  {name:"msvcr90.dll", kind_en:"VC9 CRT (lifted)", kind_pt:"CRT VC9 (liftado)", lifted:5069, pruned:231, executed:0},
+  {name:"msvcp90.dll", kind_en:"VC9 STL (lifted)", kind_pt:"STL VC9 (liftado)", lifted:3255, pruned:152, executed:0}]};
 const MSTATE = ["ok","ok","ok","ok","ok","work","todo","todo","todo","todo"];
-const PER = 16; // functions per cell
 
 function render(lang){
   const t = T[lang];
@@ -151,15 +151,18 @@ function render(lang){
     if (el.hasAttribute('data-html')) el.innerHTML = v; else el.textContent = v;
   });
   const loc = lang === 'pt' ? 'pt-BR' : 'en-US';
-  document.getElementById('b-fns').textContent = MODS.reduce((s,m)=>s+m.lifted,0).toLocaleString(loc);
+  const MODS = DATA.modules, PER = DATA.per_cell;
+  const lifted = MODS.reduce((s,m)=>s+m.lifted,0), ran = MODS.reduce((s,m)=>s+(m.executed||0),0);
+  document.getElementById('b-fns').textContent = lifted.toLocaleString(loc);
+  document.getElementById('b-ran').textContent = ran.toLocaleString(loc) + ' (' + (100*ran/lifted).toLocaleString(loc,{maximumFractionDigits:2}) + '%)';
 
   const tm = document.getElementById('tm'); tm.innerHTML = '';
   MODS.forEach(m=>{
     const el = document.createElement('div'); el.className = 'mod';
-    const nL = Math.max(1, Math.round(m.lifted/PER)), nP = Math.round(m.pruned/PER);
-    el.innerHTML = `<h3>${m.name}</h3><div class="c">${m.kind[lang]} · ${m.lifted.toLocaleString(loc)} ${t.fns}`
-      + (m.pruned ? ` · ${m.pruned} ${t.pruned}` : ``) + `</div><div class="cells">`
-      + '<span class="cell"></span>'.repeat(nL) + '<span class="cell x"></span>'.repeat(nP) + `</div>`;
+    const cells = m.cells || '0'.repeat(Math.max(1, Math.round((m.lifted+m.pruned)/PER)));
+    const ex = m.executed||0, p = (100*ex/m.lifted).toLocaleString(loc,{maximumFractionDigits:1});
+    el.innerHTML = `<h3>${m.name}</h3><div class="c">${m['kind_'+lang]} · ${ex.toLocaleString(loc)} / ${m.lifted.toLocaleString(loc)} (${p}%)</div><div class="cells">`
+      + [...cells].map(c=>c==='1'?'<span class="cell r"></span>':'<span class="cell"></span>').join('') + `</div>`;
     tm.appendChild(el);
   });
 
@@ -182,7 +185,10 @@ try {
   else if ((navigator.language||'').toLowerCase().startsWith('pt')) start = 'pt';
 } catch(e) {}
 document.querySelectorAll('.lang button').forEach(b=>b.addEventListener('click',()=>render(b.dataset.l)));
+let cur = start;
+document.querySelectorAll('.lang button').forEach(b=>b.addEventListener('click',()=>{cur=b.dataset.l;}));
 render(start);
+fetch('status.json').then(r=>r.json()).then(j=>{DATA=j; render(cur);}).catch(()=>{});
 </script>
 </body>
 </html>
