@@ -7,6 +7,8 @@
 
 # --- Game-derived material: NEVER commit (copyright + see pcrecomp PUBLISHING.md) ---
 /work/
+# the game install dir (data/, bin/) = DS_GAME_DIR
+/gamedata/
 *.exe
 *.dll
 # Lifted C is derived from the game binary -> treat as game material
