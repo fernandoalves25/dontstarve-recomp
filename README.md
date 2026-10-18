@@ -60,11 +60,23 @@ fills in as the port progresses (measured with a `COVERAGE=1` build, see `script
 | M4 Arena host, IAT binding (955/955), CRT `DllMain` runs | ✅ done |
 | M5 CRT initialization — both CRT `DllMain`s + exe CRT startup, game `main()` runs | ✅ done |
 | M6 Native main menu — the recompiled game draws its menu (headless x86-64 + Mesa) | ✅ done |
-| **M7 Stability** | 🟡 **in progress — a new world generates, loads and simulates; long play sessions next** |
-| M8 Audio (FMOD Ex shim) | ⬜ |
+| **M7 Stability** | 🟡 **in progress — a new world generates and loads; Wilson walks, picks up items; 6,000-frame sessions exit cleanly** |
+| **M8 Audio (FMOD Ex shim)** | 🟡 **in progress — real sound: the game's `.fev` events → FSB5 Vorbis waves → SDL mixer, 3D pan/attenuation** |
 | **M9 PortMaster package + FPS vs box64** | 🟡 **aarch64 build (glibc 2.17) runs under qemu; needs a real R36S** |
 
 ### 🙋 Where help is needed
+
+**Playing, with sound (M7 + M8).** A scripted headless run goes Play → New Game → Start, holds a
+direction key and **Wilson walks** across the map (grass, then the coast, "Pick Sapling" under the
+cursor) — **5,212 functions executed (4,521 in the game exe)**, exit code 0 after 6,000 frames.
+The FMOD shim now **makes sound** ([ds_audio.c](src/runtime/ds_audio.c), `DS_AUDIO=sdl`): it reads
+the game's own `.fev` project files (2,300+ events → sound definitions → waves), plays the waves out
+of the 50 FSB5 banks (7,571 Vorbis streams) through an SDL mixer with 32 voices and 3D
+pan/attenuation from the listener. FSB5 strips the Vorbis setup headers; the host rebuilds them with
+libvorbis's own encoder and checks each against the bank's CRC32 (cached in
+`$DS_HOME_DIR/vorbis_setups.bin`). Menu music, footsteps, rabbits, birds, HUD clicks all play. The
+aarch64 build links the audio too (libvorbis/libogg/zlib static, still glibc 2.17) and plays the menu
+music under qemu.
 
 **Milestones M6 + into a world.** Scripted clicks (`DS_INPUT`) take a headless run through
 Play → New Game → Start: the `WorldSim` thread generates the world (voronoi map, tile map, roads,
@@ -91,8 +103,8 @@ What's in the runtime now ([src/runtime](src/runtime)):
   `#extension` lines are hoisted to the top of each shader (ANGLE accepted them mid-file). Headless:
   a pbuffer on `EGL_PLATFORM_SURFACELESS_MESA`. `DS_DUMP_FRAMES=N` saves frames,
   `DS_EXIT_AFTER_FRAMES=N` exits cleanly, `DS_SCREEN=WxH` changes the 640×480 screen.
-- **FMOD Ex + Event, silent** ([ds_fmod.c](src/runtime/ds_fmod.c)): every object exists, every call
-  succeeds. The virtual `EventProject`/`EventCategory`/`EventGroup` vtables come from the game's own
+- **FMOD Ex + Event** ([ds_fmod.c](src/runtime/ds_fmod.c) + [ds_audio.c](src/runtime/ds_audio.c)):
+  every object exists, every call succeeds; events play through the SDL mixer with `DS_AUDIO=sdl`. The virtual `EventProject`/`EventCategory`/`EventGroup` vtables come from the game's own
   `fmod_event.dll` (slot order and stack size per method).
 - **USER32 + GDI32** ([ds_user32.c](src/runtime/ds_user32.c)): a headless window, one display mode
   and monitor. On first run the host writes a `settings.ini` for full screen at the panel size.
@@ -117,7 +129,11 @@ Help wanted, in order:
 
 - **On a real R36S:** the SDL2 backend over KMSDRM on the Mali GPU (written, tested with SDL's
   offscreen driver), the aarch64 build in a glibc ≤ 2.30 image for ArkOS, and FPS against box64.
-- **FMOD Ex + Event with sound:** SDL audio, FSB banks.
+- **The last Vorbis setups:** 6 of the 20 setup headers (low sample rates, 8–24 kHz) don't match
+  any encoder setting tried yet, so those waves stay silent.
+- **Complex FMOD events:** multi-layer events and event parameters (only layer 0 plays; 86 of 160
+  complex events have no sound definition found yet).
+- **Long play sessions:** days, nights, seasons, saving and loading.
 
 Runtime fixes on the way (useful for anyone using pcrecomp): import-stub names were dangling
 pointers (`GetProcAddress` stack buffers and ordinal names like `OLEAUT32.dll#9`), so a missing
@@ -223,11 +239,23 @@ vai se preenchendo conforme o port avança (medido com um build `COVERAGE=1`, ve
 | M4 Host arena, bind da IAT (955/955), `DllMain` do CRT roda | ✅ feito |
 | M5 Inicialização do CRT — `DllMain` dos 2 CRTs + startup do exe, `main()` do jogo roda | ✅ feito |
 | M6 Menu principal nativo — o jogo recompilado desenha o menu (headless x86-64 + Mesa) | ✅ feito |
-| **M7 Estabilidade** | 🟡 **em progresso — um mundo novo é gerado, carregado e simulado; sessões longas a seguir** |
-| M8 Áudio (shim do FMOD Ex) | ⬜ |
+| **M7 Estabilidade** | 🟡 **em progresso — um mundo novo é gerado e carregado; o Wilson anda e pega itens; sessões de 6.000 frames saem limpas** |
+| **M8 Áudio (shim do FMOD Ex)** | 🟡 **em progresso — som de verdade: eventos dos `.fev` do jogo → ondas FSB5 Vorbis → mixer SDL, pan/atenuação 3D** |
 | **M9 Pacote PortMaster + FPS vs box64** | 🟡 **build aarch64 (glibc 2.17) roda sob qemu; precisa de um R36S de verdade** |
 
 ### 🙋 Onde precisamos de ajuda
+
+**Jogando, com som (M7 + M8).** Uma execução headless roteirizada vai em Play → New Game → Start,
+segura uma tecla de direção e o **Wilson anda** pelo mapa (grama, depois a costa, "Pick Sapling"
+sob o cursor) — **5.212 funções executadas (4.521 no exe do jogo)**, código de saída 0 depois de
+6.000 frames. O shim do FMOD agora **faz som** ([ds_audio.c](src/runtime/ds_audio.c),
+`DS_AUDIO=sdl`): ele lê os próprios arquivos de projeto `.fev` do jogo (mais de 2.300 eventos →
+definições de som → ondas), toca as ondas dos 50 bancos FSB5 (7.571 streams Vorbis) num mixer SDL
+de 32 vozes com pan/atenuação 3D a partir do ouvinte. O FSB5 remove os cabeçalhos de setup do
+Vorbis; o host os reconstrói com o próprio encoder da libvorbis e confere cada um contra o CRC32 do
+banco (cache em `$DS_HOME_DIR/vorbis_setups.bin`). Música do menu, passos, coelhos, pássaros e
+cliques do HUD tocam. O build aarch64 também linka o áudio (libvorbis/libogg/zlib estáticas, ainda
+glibc 2.17) e toca a música do menu sob qemu.
 
 **Marcos M6 + dentro de um mundo.** Cliques roteirizados (`DS_INPUT`) levam uma execução
 headless por Play → New Game → Start: a thread `WorldSim` gera o mundo (mapa de voronoi, mapa de
@@ -254,8 +282,8 @@ O que já existe no runtime ([src/runtime](src/runtime)):
   nativo. As linhas `#extension` sobem para o topo de cada shader (o ANGLE aceitava no meio).
   Headless: um pbuffer em `EGL_PLATFORM_SURFACELESS_MESA`. `DS_DUMP_FRAMES=N` salva frames,
   `DS_EXIT_AFTER_FRAMES=N` sai de forma limpa, `DS_SCREEN=LxA` muda a tela de 640×480.
-- **FMOD Ex + Event, mudo** ([ds_fmod.c](src/runtime/ds_fmod.c)): todo objeto existe, toda chamada
-  dá certo. As vtables virtuais de `EventProject`/`EventCategory`/`EventGroup` vêm do
+- **FMOD Ex + Event** ([ds_fmod.c](src/runtime/ds_fmod.c) + [ds_audio.c](src/runtime/ds_audio.c)):
+  todo objeto existe, toda chamada dá certo; com `DS_AUDIO=sdl` os eventos tocam no mixer SDL. As vtables virtuais de `EventProject`/`EventCategory`/`EventGroup` vêm do
   `fmod_event.dll` do próprio jogo (ordem dos slots e tamanho da pilha de cada método).
 - **USER32 + GDI32** ([ds_user32.c](src/runtime/ds_user32.c)): uma janela headless, um modo de
   vídeo e um monitor. Na primeira execução o host grava um `settings.ini` em tela cheia no tamanho
@@ -284,7 +312,11 @@ Procura-se ajuda, nesta ordem:
 
 - **Num R36S de verdade:** o backend SDL2 sobre KMSDRM na GPU Mali (escrito, testado com o driver
   offscreen do SDL), o build aarch64 numa imagem com glibc ≤ 2.30 para o ArkOS, e FPS comparado ao box64.
-- **FMOD Ex + Event com som:** áudio SDL, bancos FSB.
+- **Os últimos setups Vorbis:** 6 dos 20 cabeçalhos de setup (taxas baixas, 8–24 kHz) ainda não
+  batem com nenhuma configuração do encoder testada, então essas ondas ficam mudas.
+- **Eventos FMOD complexos:** eventos de várias camadas e parâmetros de evento (só a camada 0 toca;
+  86 de 160 eventos complexos ainda sem definição de som encontrada).
+- **Sessões longas de jogo:** dias, noites, estações, salvar e carregar.
 
 Correções de runtime no caminho (úteis para quem usa o pcrecomp): os nomes dos stubs de import
 eram ponteiros pendurados (buffers de pilha do `GetProcAddress` e nomes por ordinal como
