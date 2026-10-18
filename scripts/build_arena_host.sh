@@ -13,8 +13,10 @@ for f in ds_host ds_kernel32; do
     [ -f "build/obj/$f.o" ] || { echo "$f COMPILE FAILED"; exit 1; }
 done
 echo "=== link arena host ==="
+# *recomp_*.o matches the exe (recomp_*.o) and the lifted CRT DLLs
+# (msvcr90_recomp_*.o, msvcp90_recomp_*.o) once they are built.
 gcc -g -o build/dontstarve_host \
-    build/obj/recomp_*.o build/obj/ds_host.o build/obj/ds_kernel32.o \
+    build/obj/*recomp_*.o build/obj/ds_host.o build/obj/ds_kernel32.o \
     -lm -lpthread > build/link.log 2>&1
 rc=$?; head -40 build/link.log; echo "link exit: $rc"
 [ $rc -eq 0 ] && ls -l build/dontstarve_host && echo LINK_OK

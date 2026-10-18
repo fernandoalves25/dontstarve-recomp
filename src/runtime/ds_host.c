@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <strings.h>
 #include <pthread.h>
 #include <sys/mman.h>
 #include "ds_hle.h"
@@ -44,8 +45,10 @@ void ds_fatal(const char *fmt, ...) {
 /* ============================================================ the arena
  * A 2 GB reservation; guest VA v -> host (g_mem_base + v). The image sits at
  * 0x00400000; the bump allocator hands out everything else from 0x01000000 up. */
-#define ARENA_SIZE   0x80000000ull     /* 2 GB, demand-paged (MAP_NORESERVE) */
-#define ARENA_HEAP0  0x01000000u       /* first free VA above the image region */
+#define ARENA_SIZE   0x80000000ull     /* 2 GB, demand-paged (MAP_NORESERVE); covers the
+                                        * exe (0x400000) and the CRT DLLs (~0x78480000). */
+#define ARENA_HEAP0  0x01000000u       /* first free VA above the exe image region */
+#define ARENA_HEAP_CEIL 0x70000000u    /* keep the bump heap below the CRT DLL images */
 static uint32_t g_brk = ARENA_HEAP0;
 
 static int arena_init(void) {
@@ -63,7 +66,7 @@ uint32_t ds_arena_alloc(uint32_t size, uint32_t align) {
     g_brk = (g_brk + align - 1) & ~(align - 1);
     uint32_t va = g_brk;
     uint64_t next = (uint64_t)g_brk + size;
-    if (next > ARENA_SIZE) { ds_fatal("arena exhausted (want %u at 0x%08X)", size, va); }
+    if (next > ARENA_HEAP_CEIL) { ds_fatal("arena heap exhausted (want %u at 0x%08X)", size, va); }
     g_brk = (uint32_t)next;
     return va;
 }
@@ -146,14 +149,29 @@ void mach_leave(void) {
     pthread_mutex_unlock(&g_mach);
 }
 
-/* ============================================================ dispatch */
-recomp_func_t recomp_lookup(uint32_t va) {
-    uint32_t lo = 0, hi = recomp_dispatch_count;
+/* ============================================================ dispatch
+ * The exe and each lifted DLL (msvcr90, msvcp90) have their own dispatch table,
+ * each sorted by VA over a disjoint range; search them in turn. The DLL tables
+ * are weak so the host still links before they are lifted in. */
+extern __attribute__((weak)) const recomp_dispatch_entry_t msvcr90_recomp_dispatch_table[];
+extern __attribute__((weak)) const uint32_t msvcr90_recomp_dispatch_count;
+extern __attribute__((weak)) const recomp_dispatch_entry_t msvcp90_recomp_dispatch_table[];
+extern __attribute__((weak)) const uint32_t msvcp90_recomp_dispatch_count;
+
+static recomp_func_t table_lookup(const recomp_dispatch_entry_t *t, uint32_t n, uint32_t va) {
+    uint32_t lo = 0, hi = n;
     while (lo < hi) {
-        uint32_t mid = lo + (hi - lo) / 2, m = recomp_dispatch_table[mid].address;
-        if (m == va) return recomp_dispatch_table[mid].func;
+        uint32_t mid = lo + (hi - lo) / 2, m = t[mid].address;
+        if (m == va) return t[mid].func;
         if (m < va) lo = mid + 1; else hi = mid;
     }
+    return NULL;
+}
+recomp_func_t recomp_lookup(uint32_t va) {
+    recomp_func_t f = table_lookup(recomp_dispatch_table, recomp_dispatch_count, va);
+    if (f) return f;
+    if (msvcr90_recomp_dispatch_table && (f = table_lookup(msvcr90_recomp_dispatch_table, msvcr90_recomp_dispatch_count, va))) return f;
+    if (msvcp90_recomp_dispatch_table && (f = table_lookup(msvcp90_recomp_dispatch_table, msvcp90_recomp_dispatch_count, va))) return f;
     return NULL;
 }
 recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return NULL; }
@@ -239,7 +257,34 @@ uint32_t hle_call_guest(uint32_t va, int nargs, const uint32_t *args) {
 }
 
 /* ============================================================ PE load + bind */
-typedef struct { uint32_t image_base, entry, import_rva, size_of_image; } ds_image;
+typedef struct { uint32_t image_base, entry, import_rva, export_rva, export_size, size_of_image; } ds_image;
+
+/* IMAGE_EXPORT_DIRECTORY (not in pe_format.h) */
+typedef struct {
+    uint32_t Characteristics, TimeDateStamp;
+    uint16_t MajorVersion, MinorVersion;
+    uint32_t Name, Base, NumberOfFunctions, NumberOfNames;
+    uint32_t AddressOfFunctions, AddressOfNames, AddressOfNameOrdinals;
+} ds_export_dir;
+
+/* Resolve an export name in a lifted DLL image to its function VA (0 if absent
+ * or a forwarder, which we leave to the HLE/stub path). */
+static uint32_t ds_dll_export(const ds_image *img, const char *name) {
+    if (!img->export_rva) return 0;
+    uint32_t base = img->image_base;
+    ds_export_dir *ed = (ds_export_dir *)ds_hostptr(base + img->export_rva);
+    uint32_t *names = (uint32_t *)ds_hostptr(base + ed->AddressOfNames);
+    uint16_t *ords  = (uint16_t *)ds_hostptr(base + ed->AddressOfNameOrdinals);
+    uint32_t *funcs = (uint32_t *)ds_hostptr(base + ed->AddressOfFunctions);
+    for (uint32_t i = 0; i < ed->NumberOfNames; i++) {
+        if (!strcmp((const char *)ds_hostptr(base + names[i]), name)) {
+            uint32_t frva = funcs[ords[i]];
+            if (frva >= img->export_rva && frva < img->export_rva + img->export_size) return 0; /* forwarder */
+            return base + frva;
+        }
+    }
+    return 0;
+}
 
 static uint8_t *slurp(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
@@ -264,6 +309,8 @@ static int ds_pe_load(const char *path, ds_image *img) {
     img->image_base = opt->ImageBase;
     img->entry = opt->ImageBase + opt->AddressOfEntryPoint;
     img->import_rva = opt->DataDirectory[PE_DIR_IMPORT].VirtualAddress;
+    img->export_rva = opt->DataDirectory[0].VirtualAddress;   /* PE_DIR_EXPORT */
+    img->export_size = opt->DataDirectory[0].Size;
     img->size_of_image = opt->SizeOfImage;
 
     /* headers */
@@ -281,9 +328,9 @@ static int ds_pe_load(const char *path, ds_image *img) {
     return 0;
 }
 
-/* Walk the import directory (in the arena) and write each IAT slot's shim VA.
- * Returns the number left unresolved. */
-static int ds_pe_bind(const ds_image *img, uint32_t (*resolve)(const char *)) {
+/* Walk a module's import directory (in the arena) and write each IAT slot's
+ * resolved VA, via resolve(dll, name). Returns the number left unresolved. */
+static int ds_pe_bind(const ds_image *img, uint32_t (*resolve)(const char *dll, const char *name)) {
     if (!img->import_rva) return 0;
     uint32_t base = img->image_base;
     int bound = 0, unresolved = 0;
@@ -296,13 +343,11 @@ static int ds_pe_bind(const ds_image *img, uint32_t (*resolve)(const char *)) {
         for (; *ilt; ilt++, iat_va += 4) {
             uint32_t va = 0;
             if (*ilt & PE_ORDINAL_FLAG) {
-                char nm[64];
-                snprintf(nm, sizeof nm, "%s#%u", dll, *ilt & 0xFFFFu);
-                va = resolve(nm);
+                char nm[80]; snprintf(nm, sizeof nm, "%s#%u", dll, *ilt & 0xFFFFu);
+                va = resolve(dll, nm);
             } else {
                 const char *name = (const char *)ds_hostptr(base + (*ilt & 0x7FFFFFFFu) + 2);
-                va = resolve(name);
-                if (!va) fprintf(stderr, "[ds] unresolved import %s!%s\n", dll, name);
+                va = resolve(dll, name);
             }
             if (va) bound++; else unresolved++;
             MEM32(iat_va) = va;
@@ -312,7 +357,27 @@ static int ds_pe_bind(const ds_image *img, uint32_t (*resolve)(const char *)) {
     return unresolved;
 }
 
+/* Module-aware resolver: MSVCR90/MSVCP90 imports -> the lifted DLL's exports;
+ * everything else (kernel32/user32/gdi32/ole32/...) -> an HLE shim (or a
+ * self-naming stub in permissive mode). */
+static int g_permissive = 1;
+static const ds_image *g_msvcr_img, *g_msvcp_img;
+static uint32_t resolve_import(const char *dll, const char *name) {
+    if (g_msvcr_img && strncasecmp(dll, "msvcr90", 7) == 0) { uint32_t va = ds_dll_export(g_msvcr_img, name); if (va) return va; }
+    if (g_msvcp_img && strncasecmp(dll, "msvcp90", 7) == 0) { uint32_t va = ds_dll_export(g_msvcp_img, name); if (va) return va; }
+    return g_permissive ? ds_resolve_or_stub(name) : ds_resolve(name);
+}
+
 /* ============================================================ main */
+extern void ds_host_init(void);   /* registers HLE shim modules (ds_kernel32.c) */
+
+static void call_dllmain(const ds_image *img, const char *tag) {
+    uint32_t a[3] = { img->image_base, 1 /*DLL_PROCESS_ATTACH*/, 0 };
+    fprintf(stderr, "[ds] %s DllMain(PROCESS_ATTACH) @ 0x%08X\n", tag, img->entry);
+    uint32_t rc = hle_call_guest(img->entry, 3, a);
+    fprintf(stderr, "[ds] %s DllMain returned %u\n", tag, rc);
+}
+
 int main(int argc, char **argv) {
     const char *exe = NULL; int run_entry = 0, permissive = 1;
     for (int i = 1; i < argc; i++) {
@@ -323,28 +388,41 @@ int main(int argc, char **argv) {
     }
     if (!exe) exe = "work/dontstarve_steam.exe";
     if (getenv("DS_HLE_TRACE")) ds_trace = 1;
+    g_permissive = permissive;
 
     fprintf(stderr, "=== Don't Starve recompiled - arena host (64-bit) ===\n");
     if (!arena_init()) return 1;
 
-    ds_image img;
-    if (ds_pe_load(exe, &img) != 0) return 1;
+    /* Map the exe and the lifted CRT DLLs into the arena at their ImageBases. */
+    ds_image img_exe, img_r, img_p;
+    if (ds_pe_load(exe, &img_exe) != 0) return 1;
+    int have_r = (ds_pe_load("work/msvcr90.dll", &img_r) == 0); if (have_r) g_msvcr_img = &img_r;
+    int have_p = (ds_pe_load("work/msvcp90.dll", &img_p) == 0); if (have_p) g_msvcp_img = &img_p;
 
-    extern void ds_host_init(void);   /* registers shim modules (ds_shims.c) */
     ds_host_init();
-    fprintf(stderr, "[ds] registered %d shims\n", g_shim_n);
+    fprintf(stderr, "[ds] registered %d HLE shims; lifted DLLs: msvcr90=%d msvcp90=%d\n",
+            g_shim_n, have_r, have_p);
 
-    int unresolved = ds_pe_bind(&img, permissive ? ds_resolve_or_stub : ds_resolve);
-    fprintf(stderr, "[ds] dispatch: %u fns; entry 0x%08X %s\n", recomp_dispatch_count,
-            img.entry, recomp_lookup(img.entry) ? "in dispatch" : "MISSING");
+    /* Bind every module's IAT (DLLs depend on kernel32 HLE + each other). */
+    int u = ds_pe_bind(&img_exe, resolve_import);
+    if (have_r) ds_pe_bind(&img_r, resolve_import);
+    if (have_p) ds_pe_bind(&img_p, resolve_import);
+    fprintf(stderr, "[ds] dispatch entry 0x%08X %s\n", img_exe.entry,
+            recomp_lookup(img_exe.entry) ? "in dispatch" : "MISSING");
 
     if (!run_entry) {
-        fprintf(stderr, "[ds] boot OK (%d unresolved). Pass --run-entry to start the guest.\n", unresolved);
+        fprintf(stderr, "[ds] boot OK (exe %d unresolved). Pass --run-entry to start.\n", u);
         return 0;
     }
-    fprintf(stderr, "[ds] running guest entry...\n");
+
+    /* OS loader order: initialise the CRT DLLs (msvcr90 first; msvcp90 needs it)
+     * before the exe's own CRT startup runs. */
+    if (have_r) call_dllmain(&img_r, "msvcr90");
+    if (have_p) call_dllmain(&img_p, "msvcp90");
+
+    fprintf(stderr, "[ds] running exe entry...\n");
     uint32_t args[1];
-    uint32_t rc = hle_call_guest(img.entry, 0, args);
-    fprintf(stderr, "[ds] guest entry returned 0x%08X\n", rc);
+    uint32_t rc = hle_call_guest(img_exe.entry, 0, args);
+    fprintf(stderr, "[ds] exe entry returned 0x%08X\n", rc);
     return (int)rc;
 }
