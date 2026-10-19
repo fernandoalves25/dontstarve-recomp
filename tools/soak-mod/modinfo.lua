@@ -1,0 +1,9 @@
+name = "dontstarve-recomp soak test"
+description = "Test only: invulnerable, fed and sane; a new day every 20 s of game time (seasons, autosaves). Not for play."
+author = "dontstarve-recomp"
+version = "1.0"
+api_version = 6
+dont_starve_compatible = true
+reign_of_giants_compatible = true
+shipwrecked_compatible = true
+hamlet_compatible = true

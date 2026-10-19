@@ -44,6 +44,16 @@ rest. The hottest instructions of `luaH_get` wait on memory (walking Lua's
 hash chains), so the remaining cost is largely the game's own memory access,
 which native code would pay too.
 
+## Stability checks
+
+- **Reloading:** seven world loads (save and quit, continue, six times). The game's live memory goes
+  back to ~47 MB at the menu and ~200 MB in the world each time; the guest heap's high-water mark
+  grows ~4–5 MB per load, so hundreds of reloads fit in the 1.75 GB arena.
+- **Long session:** [tools/soak-mod](../tools/soak-mod) (test only: the player cannot die, a new day
+  every 20 s of game time) ran 17 in-game days with the daily autosave; no error, flat memory.
+- **Register trust:** `RECOMP_ABI_CHECK` builds (every light call checks that the callee left
+  ebx/esi/edi/ebp alone) over a new game and a loaded save: no violation after the fixes it found.
+
 ## What that means on the R36S
 
 A Cortex-A35 is roughly 8–10× slower than this Xeon core single-threaded,
