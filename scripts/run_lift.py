@@ -120,8 +120,35 @@ def cmd_lift(exe, catalog, outdir, split=400, names_path=None, prefix=""):
                 setjmp_calls.add(a)
     if setjmp_calls:
         print(f"[*] setjmp thunks: {', '.join(f'0x{a:08X}' for a in sorted(setjmp_calls))}")
+    # which functions keep ebx/esi/edi/ebp (abi32): their calls and returns skip
+    # those four. Overrides (native code), excluded bytes and the CRT exports
+    # that move registers on purpose (EH/SEH frames, unwinding, setjmp) are not.
+    from abi32 import analyze, import_preserves, flags_analysis
+    forced = set(overrides) | set(excluded) | set(setjmp_calls)
+    pe.parse_data_directories()
+    exports = pe.DIRECTORY_ENTRY_EXPORT.symbols if hasattr(pe, "DIRECTORY_ENTRY_EXPORT") else []
+    for e in exports:
+        if e.address and e.name and not import_preserves(e.name.decode("latin1")):
+            forced.add(base + e.address)
+    t_abi = time.time()
+    abi_funcs = [rebuild(md, img, base, fd) for fd in fds
+                 if fd["address"] not in overrides and fd["address"] not in excluded]
+    preserving = analyze(abi_funcs, iat, forced_nonpreserving=forced)
+    # flags across calls: published at the returns of the functions a call
+    # site reads them after (all of them if an indirect call site does, or in
+    # a DLL, whose callers live in other modules), stored before calls only
+    # for callees that read them on entry
+    publish, entry_reads, indirect = flags_analysis(abi_funcs, iat)
+    publish_all = indirect or bool(prefix)
+    del abi_funcs
+    print(f"[*] flags: {len(publish)} functions publish them at ret"
+          f"{' (all: an indirect call site reads them, or a DLL)' if publish_all else ''}, "
+          f"{len(entry_reads)} read them on entry")
+    print(f"[*] callee-saved registers: {len(preserving)} of {len(fds)} functions preserve them "
+          f"({time.time() - t_abi:.0f}s)")
     lifter = Lifter(iat_map=iat, func_names={}, lifted=lifted, precise_carry=True,
-                    hook_sites=set(hooks), setjmp_calls=setjmp_calls)
+                    hook_sites=set(hooks), setjmp_calls=setjmp_calls, preserving=preserving,
+                    flags=(publish, entry_reads | set(overrides), publish_all))
     os.makedirs(outdir, exist_ok=True)
     for fn in os.listdir(outdir):
         if fn.startswith(prefix + "recomp_") and fn.endswith((".c", ".h")):

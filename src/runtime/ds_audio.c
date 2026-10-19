@@ -436,26 +436,44 @@ static const vsetup *vs_find(uint32_t crc, int channels) {
 }
 
 /* Decode a wave to interleaved int16 (cached). 0 on failure. */
-static int decode(wave *w) {
-    if (w->pcm) return 1;
+/* The three Vorbis headers for wave w into vi/vc (the setup one rebuilt, see
+ * vs_find). 0 on success; on failure vi/vc are cleared. */
+static int vorbis_open(const wave *w, vorbis_info *vi, vorbis_comment *vc) {
+    vorbis_info_init(vi); vorbis_comment_init(vc);
     const vsetup *v = vs_find(w->crc, w->channels);
-    if (!v || v->channels != w->channels) return 0;
+    if (!v || v->channels != w->channels) goto fail;
     uint8_t ident[64]; long nid = v->nident < 64 ? v->nident : 64;
     memcpy(ident, v->ident, (size_t)nid);
     memcpy(ident + 12, &w->rate, 4);                     /* the encoder ran at a rate of the same family */
-    vorbis_info vi; vorbis_comment vc; vorbis_info_init(&vi); vorbis_comment_init(&vc);
     ogg_packet op; memset(&op, 0, sizeof op);
     op.packet = ident; op.bytes = nid; op.b_o_s = 1;
-    if (vorbis_synthesis_headerin(&vi, &vc, &op)) goto fail;
+    if (vorbis_synthesis_headerin(vi, vc, &op)) goto fail;
     oggpack_buffer ob; oggpack_writeinit(&ob);          /* an empty comment header */
     oggpack_write(&ob, 3, 8); for (const char *s = "vorbis"; *s; s++) oggpack_write(&ob, (unsigned long)*s, 8);
     oggpack_write(&ob, 0, 32); oggpack_write(&ob, 0, 32); oggpack_write(&ob, 1, 1);
     op.packet = oggpack_get_buffer(&ob); op.bytes = oggpack_bytes(&ob); op.b_o_s = 0;
-    int bad = vorbis_synthesis_headerin(&vi, &vc, &op);
+    int bad = vorbis_synthesis_headerin(vi, vc, &op);
     oggpack_writeclear(&ob);
     if (bad) goto fail;
     op.packet = v->setup; op.bytes = v->nsetup;
-    if (vorbis_synthesis_headerin(&vi, &vc, &op)) goto fail;
+    if (vorbis_synthesis_headerin(vi, vc, &op)) goto fail;
+    return 0;
+fail:
+    vorbis_comment_clear(vc); vorbis_info_clear(vi);
+    return -1;
+}
+static void pcm_out(int16_t *dst, float **in, int frames, int ch) {
+    for (int i = 0; i < frames; i++)
+        for (int c = 0; c < ch; c++) {
+            float s = in[c][i] * 32767.0f;
+            dst[i * ch + c] = (int16_t)(s > 32767.0f ? 32767 : s < -32768.0f ? -32768 : s);
+        }
+}
+static int decode(wave *w) {
+    if (w->pcm) return 1;
+    vorbis_info vi; vorbis_comment vc;
+    if (vorbis_open(w, &vi, &vc)) return 0;
+    ogg_packet op; memset(&op, 0, sizeof op);
     vorbis_dsp_state vd; vorbis_block vb;
     if (vorbis_synthesis_init(&vd, &vi)) goto fail;
     vorbis_block_init(&vd, &vb);
@@ -472,11 +490,7 @@ static int decode(wave *w) {
         float **out; int got;
         while ((got = vorbis_synthesis_pcmout(&vd, &out)) > 0) {
             if (n + (size_t)got > cap) { cap = (n + (size_t)got) * 2; pcm = (int16_t *)realloc(pcm, cap * (size_t)w->channels * 2); }
-            for (int i = 0; i < got; i++)
-                for (int c = 0; c < w->channels; c++) {
-                    float s = out[c][i] * 32767.0f;
-                    pcm[(n + (size_t)i) * w->channels + (size_t)c] = (int16_t)(s > 32767.0f ? 32767 : s < -32768.0f ? -32768 : s);
-                }
+            pcm_out(pcm + n * w->channels, out, got, w->channels);
             n += (size_t)got;
             vorbis_synthesis_read(&vd, got);
         }
@@ -491,6 +505,63 @@ fail:
     return 0;
 }
 
+/* ---- streaming: a long wave (music, an ambience loop) is not decoded
+ * whole -- a three-minute track took seconds of the game thread on a slow
+ * core and ~30 MB -- but a little at a time in the mixer thread, as FMOD
+ * streams them: a buffer of STREAM_CAP frames, topped up as playback moves
+ * on, rewound when a loop comes round. */
+#define STREAM_MIN_SEC 5
+#define STREAM_CAP     16384
+typedef struct {
+    const wave *w; const uint8_t *d, *end; long pno; int eof;
+    vorbis_info vi; vorbis_comment vc; vorbis_dsp_state vd; vorbis_block vb;
+    int16_t *buf; uint32_t base, have;            /* buf holds frames [base, base + have) */
+} vstream;
+static int wave_streamed(const wave *w) { return w->samples > (uint32_t)STREAM_MIN_SEC * w->rate; }
+static void stream_close(vstream *st) {
+    if (!st->buf) return;
+    vorbis_block_clear(&st->vb); vorbis_dsp_clear(&st->vd);
+    vorbis_comment_clear(&st->vc); vorbis_info_clear(&st->vi);
+    free(st->buf); st->buf = NULL;
+}
+static int stream_open(vstream *st, const wave *w) {
+    memset(st, 0, sizeof *st);
+    if (vorbis_open(w, &st->vi, &st->vc)) return -1;
+    if (vorbis_synthesis_init(&st->vd, &st->vi)) { vorbis_comment_clear(&st->vc); vorbis_info_clear(&st->vi); return -1; }
+    vorbis_block_init(&st->vd, &st->vb);
+    st->w = w; st->d = g_banks[w->bank].data + w->offset; st->end = st->d + w->size; st->pno = 3;
+    st->buf = (int16_t *)malloc((size_t)STREAM_CAP * w->channels * 2);
+    if (!st->buf) { vorbis_block_clear(&st->vb); vorbis_dsp_clear(&st->vd); vorbis_comment_clear(&st->vc); vorbis_info_clear(&st->vi); return -1; }
+    return 0;
+}
+/* frame p of the stream (all channels), decoding up to it; NULL past the end */
+static const int16_t *stream_frame(vstream *st, uint32_t p) {
+    const wave *w = st->w; int ch = w->channels;
+    if (p < st->base) { stream_close(st); if (stream_open(st, w)) return NULL; }   /* a loop: rewind */
+    while (p >= st->base + st->have) {
+        if (st->have + 4096 > STREAM_CAP) {            /* room: drop what is behind p */
+            uint32_t drop = p - st->base; if (drop > st->have) drop = st->have;
+            memmove(st->buf, st->buf + (size_t)drop * ch, (size_t)(st->have - drop) * ch * 2);
+            st->base += drop; st->have -= drop;
+        }
+        float **out; int got = vorbis_synthesis_pcmout(&st->vd, &out);
+        if (got > 0) {
+            uint32_t room = STREAM_CAP - st->have; if ((uint32_t)got > room) got = (int)room;
+            pcm_out(st->buf + (size_t)st->have * ch, out, got, ch);
+            st->have += (uint32_t)got; vorbis_synthesis_read(&st->vd, got);
+            continue;
+        }
+        if (st->eof || st->d + 2 > st->end) { st->eof = 1; return NULL; }
+        uint16_t len; memcpy(&len, st->d, 2); st->d += 2;
+        if (!len || st->d + len > st->end) { st->eof = 1; return NULL; }
+        ogg_packet op; memset(&op, 0, sizeof op);
+        op.packet = (unsigned char *)st->d; op.bytes = len; op.packetno = st->pno++; op.granulepos = -1;
+        st->d += len;
+        if (vorbis_synthesis(&st->vb, &op) == 0) vorbis_synthesis_blockin(&st->vd, &st->vb);
+    }
+    return st->buf + (size_t)(p - st->base) * ch;
+}
+
 /* ===================== voices + mixer */
 #define NVOICE 32
 #define OUT_RATE 44100
@@ -499,6 +570,7 @@ typedef struct {
     int layer; const evlayer *lay;               /* looping layers pick a new wave each time round */
     uint32_t wait;                               /* spawning layers: silent frames before the next wave */
     const char *cat;                             /* the event's category ("set_sfx/voice") */
+    vstream *st;                                 /* a long wave: decoded as it plays */
     const wave *w; double pos, step;
     float vol, gain_l, gain_r;
     float x, y, z; int has3d;
@@ -514,7 +586,7 @@ static int g_audio_on = -1;
 static size_t g_pcm_bytes, g_pcm_cap; static uint32_t g_clock;
 static int decode_lru(wave *w) {
     w->used = ++g_clock;
-    if (w->pcm) return 1;
+    if (w->pcm || wave_streamed(w)) return 1;    /* a long one streams instead */
     if (!decode(w)) return 0;
 #if defined(__aarch64__)
     const int def_mb = 96;                          /* a 1 GB handheld */
@@ -580,33 +652,41 @@ static void mix_cb(void *ud, Uint8 *stream, int len) {
     for (int k = 0; k < NVOICE; k++) {
         voice *v = &g_voice[k]; if (!v->active) continue;
         const wave *w = v->w;
+        uint32_t len = v->st ? w->samples : w->frames;
         for (int i = 0; i < frames; i++) {
             uint32_t p = (uint32_t)v->pos;
             if (v->wait) {                                     /* between two spawned waves */
                 if (--v->wait) continue;
-                if (v->lay && v->lay->n > 1) {
+                if (v->lay && v->lay->n > 1 && !v->st) {
                     const wave *n = &g_waves[v->lay->idx[rand() % v->lay->n]];
-                    if (n->pcm) { v->w = w = n; v->step = (double)w->rate / OUT_RATE; }
+                    if (n->pcm) { v->w = w = n; v->step = (double)w->rate / OUT_RATE; len = w->frames; }
                 }
                 v->pos = 0; p = 0;
             }
-            if (p >= w->frames) {
+            const int16_t *f = NULL;
+            if (p < len) {
+                if (!v->st) f = w->pcm + (size_t)p * w->channels;
+                else if (p >= v->st->base && p < v->st->base + v->st->have) f = v->st->buf + (size_t)(p - v->st->base) * w->channels;
+                else f = stream_frame(v->st, p);
+            }
+            if (!f) {
                 const evlayer *y = v->lay;
                 if (y && y->spawn_max && v->ev) {                 /* spawn the next one later */
                     uint32_t ms = y->spawn_min + (y->spawn_max > y->spawn_min ? (uint32_t)rand() % (y->spawn_max - y->spawn_min) : 0);
                     v->wait = ms * (OUT_RATE / 1000) + 1; v->pos = 0; continue;
                 }
                 if (!v->loop) { v->active = 0; break; }
-                v->pos -= w->frames;
-                if (y && y->n > 1) {                            /* another of the layer's waves, if decoded */
+                v->pos = p >= len ? v->pos - len : 0;   /* round again (a stream rewinds) */
+                if (y && y->n > 1 && !v->st) {                  /* another of the layer's waves, if decoded */
                     const wave *n = &g_waves[y->idx[rand() % y->n]];
-                    if (n->pcm) { v->w = w = n; v->pos = 0; v->step = (double)w->rate / OUT_RATE; }
+                    if (n->pcm) { v->w = w = n; v->pos = 0; v->step = (double)w->rate / OUT_RATE; len = w->frames; }
                 }
                 p = (uint32_t)v->pos;
-                if (p >= w->frames) { v->active = 0; break; }
+                f = p >= len ? NULL : !v->st ? w->pcm + (size_t)p * w->channels : stream_frame(v->st, p);
+                if (!f) { v->active = 0; break; }
             }
             float sl, sr;
-            if (w->channels == 2) { sl = w->pcm[2 * p]; sr = w->pcm[2 * p + 1]; } else sl = sr = w->pcm[p];
+            if (w->channels == 2) { sl = f[0]; sr = f[1]; } else sl = sr = f[0];
             acc[2 * i] += sl * v->gain_l; acc[2 * i + 1] += sr * v->gain_r;
             v->pos += v->step;
         }
@@ -639,6 +719,23 @@ static int audio_on(void) {
             free(w->pcm); w->pcm = NULL; w->frames = 0;
         }
         fprintf(stderr, "[audio] check: %d of %d waves decode\n", g_nwaves - bad, g_nwaves);
+        int ns = 0, nbad = 0;                                  /* streams give the same samples */
+        for (int i = 0; i < g_nwaves; i++) {
+            wave *w = &g_waves[i];
+            if (!wave_streamed(w) || !decode(w)) continue;
+            vstream st; ns++;
+            if (stream_open(&st, w)) { nbad++; free(w->pcm); w->pcm = NULL; continue; }
+            int diff = 0;
+            for (uint32_t f = 0; f < w->frames && !diff; f++) {
+                const int16_t *x = stream_frame(&st, f);
+                if (!x || memcmp(x, w->pcm + (size_t)f * w->channels, (size_t)w->channels * 2)) diff = 1;
+            }
+            const int16_t *x = stream_frame(&st, 0);           /* and a rewind */
+            if (!x || memcmp(x, w->pcm, (size_t)w->channels * 2)) diff = 1;
+            if (diff && nbad++ < 4) fprintf(stderr, "[audio] check: stream of %s differs\n", w->name);
+            stream_close(&st); free(w->pcm); w->pcm = NULL; w->frames = 0;
+        }
+        fprintf(stderr, "[audio] check: %d of %d streamed waves match their full decode\n", ns - nbad, ns);
     }
     return g_audio_on;
 }
@@ -696,7 +793,15 @@ static void start_layer(event *e, uint32_t id, int k, wave *w, uint32_t wait) {
     for (int i = 0; i < NVOICE; i++) if (!g_voice[i].active) { n = i; break; }
     if (n < 0) n = rand() % NVOICE;                             /* steal */
     const evlayer *y = &e->m.lay[k];
-    voice *v = &g_voice[n]; memset(v, 0, sizeof *v);
+    voice *v = &g_voice[n];
+    vstream *st = v->st;                          /* reuse the voice's stream buffer */
+    if (st) stream_close(st);
+    memset(v, 0, sizeof *v);
+    if (wave_streamed(w)) {
+        if (!st) st = (vstream *)calloc(1, sizeof *st);
+        if (!st || stream_open(st, w)) { free(st); return; }
+        v->st = st;
+    } else free(st);
     v->active = 1; v->loop = y->loop; v->ev = id; v->layer = k; v->lay = y; v->w = w; v->wait = wait; v->cat = e->m.cat;
     v->step = (double)w->rate / OUT_RATE; v->vol = e->vol * y->vol * layer_gain(e, k);
     v->x = e->x; v->y = e->y; v->z = e->z; v->has3d = e->has3d;

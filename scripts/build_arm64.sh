@@ -16,13 +16,16 @@ cd "$(dirname "$0")/.."
 CC=${CC:-aarch64-linux-gnu-gcc}
 OBJ=build/obj-arm64
 mkdir -p "$OBJ"
-DEFS="-DRECOMP_STRICT_ICALL -DRECOMP_LOCAL_REGS -DRECOMP_HOST_SETJMP -DRECOMP_X87_WINDOW -DRECOMP_X87_LOCAL -DRECOMP_MEM_BASE=0x100000000ull -DRECOMP_MEM_QUAL="
+DEFS="-DRECOMP_STRICT_ICALL -DRECOMP_LOCAL_REGS -DRECOMP_HOST_SETJMP -DRECOMP_X87_WINDOW -DRECOMP_X87_LOCAL -DRECOMP_MEM_BASE=0x100000000ull -DRECOMP_MEM_QUAL= -DRECOMP_LCACHE_BITS=16 -DRECOMP_SETJMP_VA0=0x785926F0u -DRECOMP_SETJMP_VA1=0x785926B0u -DRECOMP_NO_ICALL_TRACE"
 # -O2 plus the loop/inlining passes -fprofile-use would switch on: on the
 # lifted code (goto-heavy, many small calls) they cut the game's CPU time per
 # frame by ~29% on x86 (scripts/bench.sh: 6.3 -> 4.5 ms); a real profile on
 # top of them added nothing measurable.
 FAST="-funroll-loops -fpeel-loops -ftracer -finline-functions -fipa-cp-clone -funswitch-loops -fsplit-loops -fpredictive-commoning -fgcse-after-reload -ftree-loop-distribute-patterns"
-FLAGS="-O2 $FAST -mcpu=cortex-a35 -w -fwrapv -fno-strict-aliasing -fexceptions"   # RK3326 = Cortex-A35
+# -fno-pie: a PIE reaches every global (the guest registers, the x87 stack,
+# the call counters) through the GOT -- two loads -- and aarch64 ld does not
+# relax them; a fixed-address executable uses one adrp+add.
+FLAGS="-O2 $FAST -mcpu=cortex-a35 -fno-pie -w -fwrapv -fno-strict-aliasing -fexceptions"   # RK3326 = Cortex-A35
 # PGO=dir: profile-guided build from a training run's .gcda files, renamed for
 # this object directory (#...#build#obj-arm64#<file>.gcda; see docs/PERFORMANCE.md)
 [ -n "${PGO:-}" ] && FLAGS="$FLAGS -fprofile-use=$PGO -fprofile-partial-training -fprofile-correction"
@@ -46,7 +49,7 @@ elif [ -n "${SYSROOT:-}" ]; then
     LIBDIR="--sysroot=$SYSROOT -B$SYSROOT/usr/lib/$MA -L$SYSROOT/lib/$MA -L$SYSROOT/usr/lib/$MA \
             -Wl,-rpath-link=$SYSROOT/lib/$MA:$SYSROOT/usr/lib/$MA"
 fi
-for f in ds_host ds_kernel32 ds_win32 ds_user32 ds_file ds_net ds_thread ds_gles ds_input ds_fmod ds_audio ds_sdl; do
+for f in ds_host ds_kernel32 ds_win32 ds_user32 ds_file ds_net ds_thread ds_gles ds_input ds_fmod ds_audio ds_sdl ds_sample; do
     $CC -c $FLAGS -g $SDLDEF -I pcrecomp/runtime/recomp32 -I pcrecomp/runtime/win32hle -I src/runtime \
         $DEFS "src/runtime/$f.c" -o "$OBJ/$f.o" 2>>build/arm64_errors.log \
         || echo "FAIL: $f.c" >>build/arm64_errors.log
@@ -54,9 +57,9 @@ done
 echo "errors: $(grep -c FAIL build/arm64_errors.log)"
 if [ "${1:-}" = link ]; then
     # the libraries' own dependencies (ALSA, X11, ...) are the device's business
-    $CC $LIBDIR -rdynamic -Wl,--allow-shlib-undefined -o build/dontstarve_host.aarch64 "$OBJ"/*.o \
+    $CC $LIBDIR -no-pie -rdynamic -Wl,--allow-shlib-undefined -o build/dontstarve_host.aarch64 "$OBJ"/*.o \
         -Wl,-Bstatic -lvorbisenc -lvorbis -logg -lz -Wl,-Bdynamic \
-        -lSDL2 -lEGL -lGLESv2 -lm -lpthread && echo "LINK_OK build/dontstarve_host.aarch64"
+        -lSDL2 -lEGL -lGLESv2 -lm -lpthread -ldl && echo "LINK_OK build/dontstarve_host.aarch64"
     echo "newest glibc symbol needed: $(aarch64-linux-gnu-objdump -T build/dontstarve_host.aarch64 \
         | grep -o 'GLIBC_[0-9.]*' | sort -t. -k2,2n -k3,3n -u | tail -1)"
 fi

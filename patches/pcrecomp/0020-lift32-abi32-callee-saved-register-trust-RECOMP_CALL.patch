@@ -1,0 +1,553 @@
+From 327eed0075a0407daaaec3e33b72a378eb615523 Mon Sep 17 00:00:00 2001
+From: Fernando Alves <67828493+fernandoalves25@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 05:39:47 +0000
+Subject: [PATCH] lift32/abi32: callee-saved register trust (RECOMP_CALL_P /
+ ICALL_P / ITAIL_P), flags stored across calls only where read,
+ RECOMP_ABI_CHECK debug mode
+
+---
+ runtime/recomp32/recomp_types.h |  88 ++++++++++
+ tools/lift/abi32.py             | 274 ++++++++++++++++++++++++++++++++
+ tools/lift/lift32.py            |  61 +++++--
+ 3 files changed, 412 insertions(+), 11 deletions(-)
+ create mode 100644 tools/lift/abi32.py
+
+diff --git a/runtime/recomp32/recomp_types.h b/runtime/recomp32/recomp_types.h
+index fd02023..f1b0415 100644
+--- a/runtime/recomp32/recomp_types.h
++++ b/runtime/recomp32/recomp_types.h
+@@ -123,14 +123,41 @@ extern const uint32_t recomp_dispatch_count;
+ #define RECOMP_REGS_LOCALS uint32_t l_eax = g_eax, l_ecx = g_ecx, l_edx = g_edx, l_ebx = g_ebx, l_esp = g_esp, l_esi = g_esi, l_edi = g_edi, l_ebp = g_ebp;
+ #define RECOMP_REGS_OUT() (g_eax = l_eax, g_ecx = l_ecx, g_edx = l_edx, g_ebx = l_ebx, g_esp = l_esp, g_esi = l_esi, g_edi = l_edi, g_ebp = l_ebp, RECOMP_X87_OUT())
+ #define RECOMP_REGS_IN() (l_eax = g_eax, l_ecx = g_ecx, l_edx = g_edx, l_ebx = g_ebx, l_esp = g_esp, l_esi = g_esi, l_edi = g_edi, l_ebp = g_ebp, RECOMP_X87_IN())
++/* Only the registers a call may change under the x86 ABI (eax, ecx, edx and
++ * esp): ebx/esi/edi/ebp come back as they went in from a callee the lifter
++ * proved preserves them (it never writes them, or saves and restores them;
++ * lift32 preserving=). */
++#ifdef RECOMP_ABI_CHECK
++/* Debug: preserving functions still write all eight back, and every light
++ * call checks that ebx/esi/edi/ebp came back as they went in; the host's
++ * recomp_abi_violation names the callee that changed one. */
++void recomp_abi_violation(uint32_t caller, const char *callee, uint32_t va, int reg, uint32_t was, uint32_t now);
++#define RECOMP_REGS_OUT_V() RECOMP_REGS_OUT()
++#define RECOMP_ABI_CHECK_REGS(name, va) do { \
++    if (g_ebx != l_ebx) recomp_abi_violation(_caller, name, va, 0, l_ebx, g_ebx); \
++    if (g_esi != l_esi) recomp_abi_violation(_caller, name, va, 1, l_esi, g_esi); \
++    if (g_edi != l_edi) recomp_abi_violation(_caller, name, va, 2, l_edi, g_edi); \
++    if (g_ebp != l_ebp) recomp_abi_violation(_caller, name, va, 3, l_ebp, g_ebp); } while (0)
++#else
++#define RECOMP_REGS_OUT_V() (g_eax = l_eax, g_ecx = l_ecx, g_edx = l_edx, g_esp = l_esp, RECOMP_X87_OUT())
++#define RECOMP_ABI_CHECK_REGS(name, va) ((void)0)
++#endif
++#define RECOMP_REGS_IN_V() (l_eax = g_eax, l_ecx = g_ecx, l_edx = g_edx, l_esp = g_esp, RECOMP_X87_IN())
+ #else
+ #define RECOMP_REGS_LOCALS
+ #define RECOMP_REGS_OUT() ((void)0)
+ #define RECOMP_REGS_IN() ((void)0)
++#define RECOMP_REGS_OUT_V() ((void)0)
++#define RECOMP_REGS_IN_V() ((void)0)
+ #endif
+ /* The one way out of a lifted function body: the registers go back to the
+  * globals first when they are locals. */
+ #define RECOMP_RETURN() do { RECOMP_REGS_OUT(); return; } while (0)
++/* A preserving function still writes all eight back: a call site that does
++ * the full exchange (a tail jump to an unknown target, a thunk, a switch's
++ * default) may reach it and read them; only the reload after a light call is
++ * skipped (RECOMP_REGS_IN_V). */
++#define RECOMP_RETURN_P() do { RECOMP_REGS_OUT(); return; } while (0)
+ 
+ #if defined(RECOMP_GENERATED_CODE) && !defined(RECOMP_LOCAL_REGS)
+ #define eax g_eax
+@@ -1200,6 +1227,19 @@ int recomp_jmp_depth(void);                               /* host: machine-lock
+     RECOMP_REGS_IN(); \
+     g_cur_func = _caller;  /* the callee RECOMP_ENTER clobbered it */ \
+ } while(0)
++/* the same, for a callee that preserves ebx/esi/edi/ebp (see RECOMP_REGS_IN_V);
++ * the lifter stores the caller's flags ahead of it only when the callee
++ * reads them on entry (abi32.flags_analysis) */
++#define RECOMP_CALL_P(func) do { \
++    uint32_t _caller = g_cur_func; \
++    PUSH32(esp, RECOMP_RETADDR); /* dummy return address */ \
++    \
++    RECOMP_REGS_OUT(); \
++    func(); \
++    RECOMP_ABI_CHECK_REGS(#func, 0); \
++    RECOMP_REGS_IN_V(); \
++    g_cur_func = _caller;  /* the callee RECOMP_ENTER clobbered it */ \
++} while(0)
+ 
+ /* Indirect call through dispatch */
+ #define RECOMP_ICALL(target_va) do { \
+@@ -1229,6 +1269,37 @@ int recomp_jmp_depth(void);                               /* host: machine-lock
+         eax = 0; \
+     } \
+ } while(0)
++/* the same, for a callee that preserves ebx/esi/edi/ebp (see RECOMP_REGS_IN_V);
++ * the lifter stores the caller's flags ahead of it only when the callee
++ * reads them on entry (abi32.flags_analysis) */
++#define RECOMP_ICALL_P(target_va) do { \
++    uint32_t _va = (uint32_t)(target_va); \
++    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
++    g_icall_from[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = g_cur_func; \
++    g_icall_trace_idx++; \
++    g_icall_count++; \
++    recomp_func_t _fn = recomp_lookup_manual(_va); \
++    if (!_fn) _fn = recomp_lookup(_va); \
++    if (!_fn) _fn = recomp_lookup_import(_va); \
++    RECOMP_SETJMP_TRY(_va) \
++    if (_fn) { \
++        uint32_t _caller = g_cur_func; \
++        PUSH32(esp, RECOMP_RETADDR); \
++        \
++        RECOMP_REGS_OUT(); \
++        _fn(); \
++        RECOMP_ABI_CHECK_REGS("icall", _va); \
++        RECOMP_REGS_IN_V(); \
++        g_cur_func = _caller;  /* the callee RECOMP_ENTER clobbered it */ \
++    } else { \
++        /* Nothing was pushed on this path, so there is nothing to pop: an \
++         * `esp += 4` here shifted the caller's stack by one slot per miss. \
++         * (Nocturne's CRT init runner lost its saved registers that way and \
++         * skipped ~90 static constructors after its first unlifted entry.) */ \
++        RECOMP_MISS("ICALL", _va); \
++        eax = 0; \
++    } \
++} while(0)
+ 
+ /* Indirect tail call (jmp through dispatch) */
+ #define RECOMP_ITAIL(target_va) do { \
+@@ -1245,6 +1316,23 @@ int recomp_jmp_depth(void);                               /* host: machine-lock
+         to the saved return address; that is a return, not a missing target. */ } \
+     else { RECOMP_MISS("ITAIL", _va); } \
+ } while(0)
++/* the same, for a callee that preserves ebx/esi/edi/ebp (see RECOMP_REGS_IN_V);
++ * the lifter stores the caller's flags ahead of it only when the callee
++ * reads them on entry (abi32.flags_analysis) */
++#define RECOMP_ITAIL_P(target_va) do { \
++    uint32_t _va = (uint32_t)(target_va); \
++    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
++    g_icall_from[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = g_cur_func; \
++    g_icall_trace_idx++; \
++    g_icall_count++; \
++    recomp_func_t _fn = recomp_lookup_manual(_va); \
++    if (!_fn) _fn = recomp_lookup(_va); \
++    if (!_fn) _fn = recomp_lookup_import(_va); \
++    if (_fn) { RECOMP_REGS_OUT(); _fn(); RECOMP_REGS_IN_V(); } \
++    else if (_va == RECOMP_RETADDR) { /* setjmp and friends return by jumping \
++        to the saved return address; that is a return, not a missing target. */ } \
++    else { RECOMP_MISS("ITAIL", _va); } \
++} while(0)
+ 
+ /* ============================================================
+  * Optional function-entry tracer (enable with -DRECOMP_TRACE).
+diff --git a/tools/lift/abi32.py b/tools/lift/abi32.py
+new file mode 100644
+index 0000000..90bbbe1
+--- /dev/null
++++ b/tools/lift/abi32.py
+@@ -0,0 +1,274 @@
++"""Which lifted functions preserve the x86 callee-saved registers.
++
++Every lifted call writes the eight registers back to the globals and reads
++them all again afterwards (RECOMP_REGS_OUT / RECOMP_REGS_IN). Under the x86
++ABI a callee hands ebx, esi, edi and ebp back unchanged, so for a callee that
++provably does, the caller can keep its own copies (RECOMP_CALL_P) and the
++callee need not write them back (RECOMP_RETURN_P). What is not proved keeps
++the full exchange.
++
++The proof is a small dataflow per register over the function's blocks:
++whether its original value is saved on the stack (the first push saves it --
++later pushes of the same register are call arguments, which `add esp` drops
++-- and a pop or `leave` restores it). A write while nothing is saved is a
++clobber; every return or jump out must have restored it; where paths meet
++they must agree. Writes on paths that never reach
++a return (the /GS failure handler) do not count. Also preserving:
++  * a function framed by the CRT's EH/SEH helper pairs (__EH_prolog3 /
++    __EH_epilog3, _SEH_prolog4 / _SEH_epilog4): a frame helper called in the
++    entry block and on the way out of every exit -- the pair saves and
++    restores the four;
++  * MSVC's __security_check_cookie (`cmp ecx, [cookie]; jne fail; ret`).
++A tail jump inherits its target's status (a target that never returns does
++not count). The frame helpers, setjmp/longjmp and anything unproved are not.
++
++Imports are called by name: the ones that move the frame or registers on
++purpose (NONPRESERVING_IMPORT) get the full exchange, the rest are trusted
++(host shims, the lifted CRT's ordinary functions).
++"""
++import re
++
++from capstone import Cs, CS_ARCH_X86, CS_MODE_32
++from capstone.x86 import X86_OP_REG, X86_OP_MEM, X86_OP_IMM
++
++CALLEE_SAVED = ("ebx", "esi", "edi", "ebp")
++_PARENT = {"ebx": "ebx", "bx": "ebx", "bl": "ebx", "bh": "ebx",
++           "esi": "esi", "si": "esi", "sil": "esi",
++           "edi": "edi", "di": "edi", "dil": "edi",
++           "ebp": "ebp", "bp": "ebp", "bpl": "ebp"}
++NONPRESERVING_IMPORT = re.compile(
++    r"EH_prolog|EH_epilog|SEH_prolog|SEH_epilog|setjmp|longjmp|chkstk|alloca_probe|"
++    r"FrameHandler|except_handler|_unwind|NLG|CallSettingFrame|_EH4_", re.I)
++
++
++def import_preserves(name: str) -> bool:
++    return not NONPRESERVING_IMPORT.search(name or "")
++
++
++def _decoder():
++    md = Cs(CS_ARCH_X86, CS_MODE_32)
++    md.detail = True
++    return md
++
++
++def _imm_target(ins):
++    if ins.operands and ins.operands[0].type == X86_OP_IMM:
++        return ins.operands[0].imm
++    return None
++
++
++def _op_reg(ins):
++    if ins.operands and ins.operands[0].type == X86_OP_REG:
++        return _PARENT.get(ins.reg_name(ins.operands[0].reg))
++    return None
++
++
++def _events(md, block):
++    """Per instruction of a block: (mnemonic, ins, set of callee-saved written)."""
++    out = []
++    for raw in block.instructions:
++        for ins in md.disasm(raw.bytes, raw.address):
++            try:
++                _, w = ins.regs_access()
++                written = {p for p in (_PARENT.get(ins.reg_name(r)) for r in w) if p}
++            except Exception:   # noqa: BLE001 -- unknown: assume it writes them all
++                written = set(CALLEE_SAVED)
++            m = ins.mnemonic.split()[-1]          # "repz ret" -> "ret"
++            if m == "mov" and len(ins.operands) == 2 and ins.operands[0].type == X86_OP_REG \
++                    and ins.operands[1].type == X86_OP_REG and ins.operands[0].reg == ins.operands[1].reg:
++                written = set()                   # `mov edi, edi`: the CRT's hot-patch no-op
++            out.append((m, ins, written))
++    return out
++
++
++def _is_cookie_check(entry_ev, next_ev):
++    """__security_check_cookie: `cmp ecx, [cookie]; jne fail` then `ret` (the
++    fail path is __report_gsfailure, which ends the process)."""
++    return (len(entry_ev) == 2 and entry_ev[0][0] == "cmp"
++            and entry_ev[0][1].op_str.startswith("ecx, dword ptr [") and entry_ev[1][0] == "jne"
++            and bool(next_ev) and next_ev[0][0] == "ret")
++
++
++def _calls_back(a, calls, preds, entry):
++    """The calls on the single-predecessor run of blocks ending at exit a."""
++    got, seen = [], set()
++    while a is not None and a not in seen:
++        seen.add(a); got += calls.get(a, [])
++        p = preds.get(a, [])
++        a = p[0] if len(p) == 1 and a != entry else None
++    return got
++
++
++def _function_info(md, f, iat_map):
++    labels = set(f.blocks)
++    ev = {a: _events(md, b) for a, b in f.blocks.items()}
++    succ = {a: [t for t in b.successors if t in labels] for a, b in f.blocks.items()}
++    preds = {}
++    for a, ts in succ.items():
++        for t in ts:
++            preds.setdefault(t, []).append(a)
++    exits, tails, tail_np, calls = [], set(), False, {}
++    arms = [t for t in getattr(f, "jump_targets", ()) or () if t in labels]
++    unknown = False                                # control flow the proof cannot follow
++    for a, es in ev.items():
++        calls[a] = [t for m, ins, _ in es if m == "call" for t in [_imm_target(ins)] if t is not None]
++        if not es:
++            continue
++        m, ins, _ = es[-1]
++        if m in ("ret", "retn"):
++            exits.append(a)
++        elif m == "jmp":
++            t = _imm_target(ins)
++            if t is not None and t not in labels:
++                exits.append(a); tails.add(t)
++            elif t is None and ins.operands and ins.operands[0].type == X86_OP_MEM \
++                    and not ins.operands[0].mem.base and not ins.operands[0].mem.index \
++                    and ins.operands[0].mem.disp in iat_map:
++                exits.append(a)
++                if not import_preserves(iat_map[ins.operands[0].mem.disp][1]):
++                    tail_np = True
++            elif t is None:                            # a switch: on to its arms
++                if arms:
++                    succ[a] = sorted(set(succ[a]) | set(arms))
++                    for t2 in arms:
++                        preds.setdefault(t2, []).append(a)
++                else:
++                    unknown = True
++        elif not succ[a] and m not in ("call", "int3", "hlt", "ud2", "int"):
++            unknown = True                             # falls off the known code
++    exit_set = set(exits)
++    live, todo = set(), list(exits)                # blocks from which a return is reached
++    while todo:
++        a = todo.pop()
++        if a not in live:
++            live.add(a); todo.extend(preds.get(a, []))
++
++    why = {}
++
++    def preserved(r):
++        res = _preserved(r)
++        return res
++
++    def _preserved(r):
++        depth_in = {f.address: 0}
++        todo = [f.address]
++        while todo:
++            a = todo.pop()
++            d = depth_in[a]
++            for m, ins, w in ev.get(a, []):
++                if m == "push" and _op_reg(ins) == r:
++                    d = 1                             # saved (a second push is an argument:
++                                                      # `add esp` drops it, not a pop)
++                elif (m == "pop" and _op_reg(ins) == r) or (m == "leave" and r == "ebp"):
++                    if d == 0:
++                        if a in live:
++                            why[r] = ("pop0", hex(ins.address)); return False
++                    else:
++                        d -= 1
++                elif r in w and d == 0 and a in live:
++                    why[r] = ("write0", hex(ins.address), ins.mnemonic, ins.op_str); return False
++            if a in exit_set and d != 0:
++                why[r] = ("exitdepth", hex(a), d); return False
++            for t in succ.get(a, []):
++                if t not in depth_in:
++                    depth_in[t] = d; todo.append(t)
++                elif depth_in[t] != d and t in live:
++                    why[r] = ("merge", hex(t)); return False
++        return True
++
++    ok = {r: preserved(r) for r in CALLEE_SAVED}
++    entry_ev = ev.get(f.address, [])
++    ebp_framing = any("ebp" in w for _, _, w in entry_ev) or \
++        any("ebp" in w for a in exits for _, _, w in ev[a])
++    nxt = entry_ev[-1][1].address + entry_ev[-1][1].size if entry_ev else None
++    cookie = _is_cookie_check(entry_ev, ev.get(nxt, []))
++    return dict(own_ok=(all(ok.values()) and not unknown) or cookie, ok=ok, why=why, tails=tails, tail_np=tail_np,
++                returns=bool(exits), helper=not ok["ebp"] and f.size <= 96 and ebp_framing,
++                calls=[c for cs in calls.values() for c in cs], entry_calls=calls.get(f.address, []),
++                exit_calls=[_calls_back(a, calls, preds, f.address) for a in exits])
++
++
++def analyze(funcs, iat_map, forced_nonpreserving=(), debug=()):
++    """funcs: disasm32.Function objects (blocks with instruction bytes).
++    Returns the set of function VAs that preserve ebx/esi/edi/ebp."""
++    md = _decoder()
++    info = {f.address: _function_info(md, f, iat_map) for f in funcs}
++    helpers = {a for a, d in info.items() if d["helper"]}
++    np = set(forced_nonpreserving)
++    for a, d in info.items():
++        framed = bool(d["exit_calls"]) and any(c in helpers for c in d["entry_calls"]) and \
++            all(any(c in helpers for c in cs) for cs in d["exit_calls"])
++        if a in helpers or d["tail_np"]:
++            np.add(a)
++        elif framed:
++            continue                    # the helper pair saves and restores the four
++        elif not d["own_ok"] or any(c in helpers for c in d["calls"]):
++            np.add(a)
++    changed = True
++    while changed:                      # tail jumps inherit (a target that never returns does not count)
++        changed = False
++        for a, d in info.items():
++            if a not in np and any((t in np and info[t]["returns"]) or t not in info for t in d["tails"]):
++                np.add(a); changed = True
++    for a in debug:
++        if a in info:
++            d = info[a]
++            print(f"[abi32] {a:08X}: why={d['why']} ok={d['ok']} own_ok={d['own_ok']} helper={d['helper']} tails={sorted(map(hex, d['tails']))} "
++                  f"np={a in np} helper_calls={[hex(c) for c in d['calls'] if c in helpers]}")
++    return {a for a in info if a not in np}
++
++
++# ---------------------------------------------------------------- flags
++# A lifted `ret` publishes the lazy flags (RECOMP_FLAGS_OUT) and every call
++# stores the caller's first, because assembly can branch on flags a callee
++# returns (the CRT's sin/cos helpers return ZF). Compiled code almost never
++# does: the exe has 2 such call sites in 106,297. So a return publishes only
++# in a function some call site reads flags after, and a call stores the
++# caller's flags only for a callee that reads them on entry. DF is not one of
++# them (each lifted function keeps its own).
++def _flag_masks():
++    import capstone.x86 as cx
++    test = mod = 0
++    for n in dir(cx):
++        if n.startswith("X86_EFLAGS_TEST_") and not n.endswith("_DF"):
++            test |= getattr(cx, n)
++        if n.startswith(("X86_EFLAGS_MODIFY_", "X86_EFLAGS_RESET_", "X86_EFLAGS_SET_",
++                         "X86_EFLAGS_UNDEFINED_")) and not n.endswith("_DF"):
++            mod |= getattr(cx, n)
++    return test, mod
++
++
++def _reads_flags_first(insns, test, mod):
++    for y in insns:
++        m = y.mnemonic.split()[-1]
++        if y.eflags & test:
++            return True
++        if y.eflags & mod or m in ("call", "jmp", "ret", "retn"):
++            return False
++    return False
++
++
++def flags_analysis(funcs, iat_map):
++    """Returns (publish, entry_reads, indirect_readers): the functions whose
++    returns must publish the flags, the functions that read flags on entry,
++    and whether some indirect or import call is followed by a flag read
++    (then every function of the module publishes)."""
++    md = _decoder()
++    test, mod = _flag_masks()
++    publish, entry_reads, indirect = set(), set(), False
++    for f in funcs:
++        blocks = sorted(f.blocks.items())
++        flat = [ins for _, b in blocks for raw in b.instructions
++                for ins in md.disasm(raw.bytes, raw.address)]
++        entry = [ins for ins in flat if ins.address >= f.address][:12]
++        if _reads_flags_first(entry, test, mod):
++            entry_reads.add(f.address)
++        for i, ins in enumerate(flat):
++            if ins.mnemonic != "call" or not _reads_flags_first(flat[i + 1:i + 9], test, mod):
++                continue
++            t = _imm_target(ins)
++            if t is not None:
++                publish.add(t)
++            else:
++                indirect = True
++    return publish, entry_reads, indirect
+diff --git a/tools/lift/lift32.py b/tools/lift/lift32.py
+index 6b467d2..ec574d6 100644
+--- a/tools/lift/lift32.py
++++ b/tools/lift/lift32.py
+@@ -236,7 +236,16 @@ class Lifter:
+     def __init__(self, iat_map: dict = None, func_names: dict = None,
+                  lifted: set = None, precise_sbb: bool = False,
+                  patch_sites: set = None, precise_carry: bool = False,
+-                 reloc=None, hook_sites: set = None, setjmp_calls: set = None):
++                 reloc=None, hook_sites: set = None, setjmp_calls: set = None, preserving=None, flags=None):
++        # VAs of functions that preserve ebx/esi/edi/ebp (abi32.analyze): calls
++        # to them and their own returns skip those four. None: the full exchange.
++        self.preserving = preserving
++        # abi32.flags_analysis: (publish, entry_reads, publish_all). The light
++        # calls (_P) store the caller's flags only before a callee that reads
++        # them on entry, and a ret publishes them only in a function some call
++        # site reads them after. None: always (the _P calls then store too).
++        self.flags = flags
++        self._publish_here = True
+         """
+         iat_map: VA -> (dll, func_name) for import resolution
+         func_names: VA -> name for known function names
+@@ -1484,23 +1493,32 @@ class Lifter:
+                 if target in self.iat_map:
+                     dll, fname = self.iat_map[target]
+                     lines.append(f"/* call [{dll}]{fname} */")
+-                    lines.append(f"RECOMP_ICALL(0x{target:08X}u); {comment}")
++                    v = self._p_import(fname)
++                    lines.append(f"{self._flags_before() if v else ''}RECOMP_ICALL{v}(0x{target:08X}u); {comment}")
+                 elif target in self.func_names:
+-                    lines.append(f"RECOMP_CALL(recomp_{self.func_names[target]}); {comment}")
++                    v = self._p(target)
++                    lines.append(f"{self._flags_before(target) if v else ''}RECOMP_CALL{v}(recomp_{self.func_names[target]}); {comment}")
+                 elif self.lifted is not None and target not in self.lifted:
+                     lines.append(f"RECOMP_ICALL(0x{target:08X}u); {comment} /* not lifted */")
+                 elif target in self.setjmp_calls:
+                     lines.append(f"RECOMP_SETJMP_CALL(sub_{target:08X}); {comment} /* setjmp thunk */")
+                 else:
+-                    lines.append(f"RECOMP_CALL(sub_{target:08X}); {comment}")
++                    v = self._p(target)
++                    lines.append(f"{self._flags_before(target) if v else ''}RECOMP_CALL{v}(sub_{target:08X}); {comment}")
+             else:
+                 # Indirect call
++                # a virtual method, a callback: compiled code, which keeps the ABI
++                v = "_P" if self.preserving is not None else ""
++                if ops and ops[0].type == X86_OP_MEM and not ops[0].mem.base and not ops[0].mem.index \
++                        and ops[0].mem.disp in self.iat_map:          # call [IAT slot]: by the import's name
++                    v = self._p_import(self.iat_map[ops[0].mem.disp][1])
++                pre = self._flags_before() if v else ""
+                 if ops and ops[0].type == X86_OP_MEM:
+                     addr = self._fmt_mem_addr(ops[0].mem)
+-                    lines.append(f"RECOMP_ICALL(MEM32({addr})); {comment}")
++                    lines.append(f"{pre}RECOMP_ICALL{v}(MEM32({addr})); {comment}")
+                 elif ops and ops[0].type == X86_OP_REG:
+                     r = self._fmt_read(ops[0])
+-                    lines.append(f"RECOMP_ICALL({r}); {comment}")
++                    lines.append(f"{pre}RECOMP_ICALL{v}({r}); {comment}")
+                 else:
+                     lines.append(f"RECOMP_ICALL(0); /* unresolved */ {comment}")
+             # the callee's flags (see RECOMP_FLAGS_OUT)
+@@ -1514,9 +1532,9 @@ class Lifter:
+             # 0xDEAD0000 dummy return address gets read as a function argument.
+             if ops and ops[0].type == X86_OP_IMM:
+                 n = ops[0].imm
+-                lines.append(f"RECOMP_FLAGS_OUT(); esp += {4 + n}; return; {comment}")
++                lines.append(f"{'RECOMP_FLAGS_OUT(); ' if self._publish_here else ''}esp += {4 + n}; return; {comment}")
+             else:
+-                lines.append(f"RECOMP_FLAGS_OUT(); esp += 4; return; {comment}")
++                lines.append(f"{'RECOMP_FLAGS_OUT(); ' if self._publish_here else ''}esp += 4; return; {comment}")
+ 
+         elif m == 'retf':
+             lines.append(f"return; /* far return */ {comment}")
+@@ -1527,7 +1545,8 @@ class Lifter:
+                 # Branch leaves the function: a tail call, or a run of bytes that
+                 # was never really code. Either way there is no label to jump to,
+                 # so dispatch and return instead of emitting an undefined goto.
+-                lines.append(f"RECOMP_ITAIL(0x{target:08X}u); return; {comment}")
++                v = self._p(target)
++                lines.append(f"{'RECOMP_FLAGS_OUT(); ' if v else ''}RECOMP_ITAIL{v}(0x{target:08X}u); return; {comment}")
+             elif target:
+                 lines.append(f"goto L_{target:08X}; {comment}")
+             else:
+@@ -1547,7 +1566,8 @@ class Lifter:
+             target = insn.get_branch_target()
+             cond = self._make_condition(m)
+             if target and self._labels is not None and target not in self._labels:
+-                lines.append(f"if ({cond}) {{ RECOMP_ITAIL(0x{target:08X}u); return; }} {comment}")
++                v = self._p(target)
++                lines.append(f"if ({cond}) {{ {'RECOMP_FLAGS_OUT(); ' if v else ''}RECOMP_ITAIL{v}(0x{target:08X}u); return; }} {comment}")
+             elif target:
+                 lines.append(f"if ({cond}) goto L_{target:08X}; {comment}")
+             else:
+@@ -2198,10 +2218,27 @@ class Lifter:
+         lines.append("} }")
+         return lines
+ 
++    def _flags_before(self, target=None) -> str:
++        """`RECOMP_FLAGS_OUT(); ` ahead of a light call that needs it."""
++        if self.flags is None:
++            return "RECOMP_FLAGS_OUT(); "
++        return "RECOMP_FLAGS_OUT(); " if target is not None and target in self.flags[1] else ""
++
++    def _p(self, target) -> str:
++        """`_P` when the callee preserves ebx/esi/edi/ebp (see abi32)."""
++        return "_P" if self.preserving is not None and target in self.preserving else ""
++
++    def _p_import(self, name) -> str:
++        if self.preserving is None:
++            return ""
++        from abi32 import import_preserves
++        return "_P" if import_preserves(name) else ""
++
+     def lift_function(self, func) -> str:
+         """Lift an entire function to C code."""
+         lines = []
+         name = func.name
++        self._publish_here = self.flags is None or self.flags[2] or func.address in self.flags[0]
+ 
+         lines.append(f"void {name}(void) {{")
+         lines.append(f"    int _fpu_cmp = 0;")
+@@ -2276,4 +2313,6 @@ class Lifter:
+         # Every exit writes local registers back (RECOMP_RETURN is a plain
+         # `return` unless RECOMP_LOCAL_REGS). Rewritten on the text so that no
+         # emitter of a `return;` can forget it.
+-        return re.sub(r'\breturn;', 'RECOMP_RETURN();', body)
++        ret = 'RECOMP_RETURN_P();' if self.preserving is not None and func.address in self.preserving \
++            else 'RECOMP_RETURN();'
++        return re.sub(r'\breturn;', ret, body)
+-- 
+2.43.0
+

@@ -1,0 +1,142 @@
+From 39c52a4aee28a8bb5f3031b45f712c38b39245ae Mon Sep 17 00:00:00 2001
+From: Fernando Alves <67828493+fernandoalves25@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 15:39:34 +0000
+Subject: [PATCH] recomp32/lift32: indirect calls read the call-target cache
+ inline (RECOMP_LCACHE_BITS), setjmp test by constant VAs,
+ RECOMP_NO_ICALL_TRACE; the x87 window counts the light calls and needs 16+
+ FPU ops
+
+---
+ runtime/recomp32/recomp_types.h | 62 ++++++++++++++++++++++-----------
+ tools/lift/lift32.py            |  7 ++--
+ 2 files changed, 47 insertions(+), 22 deletions(-)
+
+diff --git a/runtime/recomp32/recomp_types.h b/runtime/recomp32/recomp_types.h
+index f1b0415..447105b 100644
+--- a/runtime/recomp32/recomp_types.h
++++ b/runtime/recomp32/recomp_types.h
+@@ -1210,13 +1210,47 @@ int recomp_jmp_depth(void);                               /* host: machine-lock
+     else { esp = _jb->esp; ebp = _jb->ebp; ebx = _jb->ebx; esi = _jb->esi; edi = _jb->edi; \
+            eax = _jb->val; g_cur_func = _caller_sj; } \
+ } while (0)
++#ifdef RECOMP_SETJMP_VA0   /* the host's setjmp entry points, known at build time: no call */
++#define RECOMP_SETJMP_TRY(va) if ((va) == RECOMP_SETJMP_VA0 || (va) == RECOMP_SETJMP_VA1) { RECOMP_SETJMP(); } else
++#else
+ #define RECOMP_SETJMP_TRY(va) if (recomp_is_setjmp(va)) { RECOMP_SETJMP(); } else
++#endif
+ #define RECOMP_SETJMP_CALL(func) RECOMP_SETJMP()
+ #else
+ #define RECOMP_SETJMP_TRY(va)
+ #define RECOMP_SETJMP_CALL(func) RECOMP_CALL(func)
+ #endif
+ 
++/* Indirect calls. RECOMP_ICALL_NOTE records the target in the trace ring a
++ * crash report prints; RECOMP_NO_ICALL_TRACE (release builds) keeps only the
++ * count. RECOMP_LCACHE_BITS: the host's call-target cache (va -> function,
++ * filled by recomp_lookup_manual) is read inline, so a hit costs no call;
++ * imports (>= RECOMP_LCACHE_SHIM) keep the host's own path. */
++#ifdef RECOMP_NO_ICALL_TRACE
++#define RECOMP_ICALL_NOTE(va) (g_icall_count++)
++#else
++#define RECOMP_ICALL_NOTE(va) do { \
++    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = (va); \
++    g_icall_from[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = g_cur_func; \
++    g_icall_trace_idx++; \
++    g_icall_count++; } while (0)
++#endif
++#ifdef RECOMP_LCACHE_BITS
++#ifndef RECOMP_LCACHE_SHIM
++#define RECOMP_LCACHE_SHIM 0x7F000000u
++#endif
++typedef struct { uint32_t va; recomp_func_t fn; } recomp_lcache_t;
++extern recomp_lcache_t g_lcache[1u << RECOMP_LCACHE_BITS];
++static inline recomp_func_t recomp_lookup_fast(uint32_t va) {
++    const recomp_lcache_t *e = &g_lcache[(va * 2654435761u) >> (32 - RECOMP_LCACHE_BITS)];
++    if (__builtin_expect(e->va == va && va < RECOMP_LCACHE_SHIM, 1)) return e->fn;
++    return recomp_lookup_manual(va);
++}
++#define RECOMP_LOOKUP_FAST(va) recomp_lookup_fast(va)
++#else
++#define RECOMP_LOOKUP_FAST(va) recomp_lookup_manual(va)
++#endif
++
+ /* Direct call to a known recompiled function */
+ #define RECOMP_CALL(func) do { \
+     uint32_t _caller = g_cur_func; \
+@@ -1244,11 +1278,8 @@ int recomp_jmp_depth(void);                               /* host: machine-lock
+ /* Indirect call through dispatch */
+ #define RECOMP_ICALL(target_va) do { \
+     uint32_t _va = (uint32_t)(target_va); \
+-    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
+-    g_icall_from[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = g_cur_func; \
+-    g_icall_trace_idx++; \
+-    g_icall_count++; \
+-    recomp_func_t _fn = recomp_lookup_manual(_va); \
++    RECOMP_ICALL_NOTE(_va); \
++    recomp_func_t _fn = RECOMP_LOOKUP_FAST(_va); \
+     if (!_fn) _fn = recomp_lookup(_va); \
+     if (!_fn) _fn = recomp_lookup_import(_va); \
+     RECOMP_SETJMP_TRY(_va) \
+@@ -1274,11 +1305,8 @@ int recomp_jmp_depth(void);                               /* host: machine-lock
+  * reads them on entry (abi32.flags_analysis) */
+ #define RECOMP_ICALL_P(target_va) do { \
+     uint32_t _va = (uint32_t)(target_va); \
+-    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
+-    g_icall_from[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = g_cur_func; \
+-    g_icall_trace_idx++; \
+-    g_icall_count++; \
+-    recomp_func_t _fn = recomp_lookup_manual(_va); \
++    RECOMP_ICALL_NOTE(_va); \
++    recomp_func_t _fn = RECOMP_LOOKUP_FAST(_va); \
+     if (!_fn) _fn = recomp_lookup(_va); \
+     if (!_fn) _fn = recomp_lookup_import(_va); \
+     RECOMP_SETJMP_TRY(_va) \
+@@ -1304,11 +1332,8 @@ int recomp_jmp_depth(void);                               /* host: machine-lock
+ /* Indirect tail call (jmp through dispatch) */
+ #define RECOMP_ITAIL(target_va) do { \
+     uint32_t _va = (uint32_t)(target_va); \
+-    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
+-    g_icall_from[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = g_cur_func; \
+-    g_icall_trace_idx++; \
+-    g_icall_count++; \
+-    recomp_func_t _fn = recomp_lookup_manual(_va); \
++    RECOMP_ICALL_NOTE(_va); \
++    recomp_func_t _fn = RECOMP_LOOKUP_FAST(_va); \
+     if (!_fn) _fn = recomp_lookup(_va); \
+     if (!_fn) _fn = recomp_lookup_import(_va); \
+     if (_fn) { RECOMP_FLAGS_OUT(); RECOMP_REGS_OUT(); _fn(); RECOMP_REGS_IN(); } \
+@@ -1321,11 +1346,8 @@ int recomp_jmp_depth(void);                               /* host: machine-lock
+  * reads them on entry (abi32.flags_analysis) */
+ #define RECOMP_ITAIL_P(target_va) do { \
+     uint32_t _va = (uint32_t)(target_va); \
+-    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
+-    g_icall_from[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = g_cur_func; \
+-    g_icall_trace_idx++; \
+-    g_icall_count++; \
+-    recomp_func_t _fn = recomp_lookup_manual(_va); \
++    RECOMP_ICALL_NOTE(_va); \
++    recomp_func_t _fn = RECOMP_LOOKUP_FAST(_va); \
+     if (!_fn) _fn = recomp_lookup(_va); \
+     if (!_fn) _fn = recomp_lookup_import(_va); \
+     if (_fn) { RECOMP_REGS_OUT(); _fn(); RECOMP_REGS_IN_V(); } \
+diff --git a/tools/lift/lift32.py b/tools/lift/lift32.py
+index ec574d6..0307d90 100644
+--- a/tools/lift/lift32.py
++++ b/tools/lift/lift32.py
+@@ -2307,8 +2307,11 @@ class Lifter:
+         # every call it makes. 8 FPU ops per call or more.
+         code = re.sub(r'/\*.*?\*/', '', body)              # code, not the comments
+         n_fpu = len(X87_USE.findall(code))
+-        n_call = len(re.findall(r'RECOMP_(?:CALL|ICALL|ITAIL|SETJMP_CALL)\(', code))
+-        if n_fpu and n_fpu >= 8 * max(n_call, 1):
++        # (the light _P calls sync the window too)
++        n_call = len(re.findall(r'RECOMP_(?:CALL|ICALL|ITAIL|SETJMP_CALL)(?:_P)?\(', code))
++        # and the entry load + exit store (16 values) must pay for themselves:
++        # an integer function with a few FPU ops (Lua's luaH_get: 10) loses
++        if n_fpu >= 16 and n_fpu >= 8 * max(n_call, 1):
+             body = body.replace("    RECOMP_REGS_LOCALS\n", "    RECOMP_REGS_LOCALS\n    RECOMP_X87_LOCALS\n", 1)
+         # Every exit writes local registers back (RECOMP_RETURN is a plain
+         # `return` unless RECOMP_LOCAL_REGS). Rewritten on the text so that no
+-- 
+2.43.0
+

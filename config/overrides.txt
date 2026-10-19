@@ -4,3 +4,4 @@
 7855ae20  memcpy (native: the VC9 asm dispatches its tail through jump tables the lifter cannot follow)
 7855b310  memmove (native, same reason)
 785947d8  longjmp (native: host longjmp back into the lifted setjmp frame, RECOMP_HOST_SETJMP)
+7854383f  _getptd_noexit (native: reads the CRT's per-thread data slot directly instead of four import calls)

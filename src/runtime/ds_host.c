@@ -164,6 +164,18 @@ static int arena_init(void) {
     if (p == MAP_FAILED) { perror("mmap arena"); return 0; }
 #endif
     g_mem_base = (ptrdiff_t)(uintptr_t)p;
+#ifdef MADV_HUGEPAGE
+    /* 2 MB pages where the kernel has them (transparent_hugepage "madvise" or
+       "always"): the game's memory walks (Lua tables, the entity lists) miss
+       the small TLB of an in-order core far less. DS_THP=0 keeps 4 KB pages. */
+    { const char *e = getenv("DS_THP");
+      if (!e || strcmp(e, "0")) {
+          int r = madvise(p, ARENA_SIZE, MADV_HUGEPAGE);
+          char thp[96] = ""; FILE *f = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
+          if (f) { if (!fgets(thp, sizeof thp, f)) thp[0] = 0; fclose(f); thp[strcspn(thp, "\n")] = 0; }
+          fprintf(stderr, "[ds] huge pages: madvise %s, kernel: %s\n", r ? "refused" : "ok", thp[0] ? thp : "no THP");
+      } }
+#endif
     fprintf(stderr, "[ds] arena %llu MB at host %p (g_mem_base=0x%llx)\n",
             (unsigned long long)(ARENA_SIZE >> 20), p, (unsigned long long)g_mem_base);
     return 1;
@@ -355,6 +367,15 @@ static void ds_longjmp(void) {                 /* msvcr90 longjmp(jmp_buf, int) 
     longjmp(j->host, 1);
 }
 
+/* RECOMP_ABI_CHECK builds: a light call got a callee-saved register back changed */
+void recomp_abi_violation(uint32_t caller, const char *callee, uint32_t va, int reg, uint32_t was, uint32_t now) {
+    static const char *names[] = { "ebx", "esi", "edi", "ebp" };
+    static int n;
+    if (n++ < 40)
+        fprintf(stderr, "[abi] %s changed by %s (0x%08X) called from 0x%08X: 0x%08X -> 0x%08X\n",
+                names[reg], callee, va, caller, was, now);
+}
+
 /* ============================================================ dispatch
  * The exe and each lifted DLL (msvcr90, msvcp90) have their own dispatch table,
  * each sorted by VA over a disjoint range; search them in turn. The DLL tables
@@ -400,8 +421,13 @@ void ds_register_manual(uint32_t va, recomp_func_t fn) {
 static uint32_t g_last_import_va;                  /* the shim VA being run (ds_last_import_va) */
 extern uint64_t g_prof_imports;
 static void ds_unimplemented_import(void);
+#ifdef RECOMP_LCACHE_BITS                       /* the lifted code reads it inline (recomp_types.h) */
+#define LCACHE_BITS RECOMP_LCACHE_BITS
+recomp_lcache_t g_lcache[1u << LCACHE_BITS];
+#else
 #define LCACHE_BITS 16
-static struct { uint32_t va; recomp_func_t fn; } g_lcache[1u << LCACHE_BITS];
+struct { uint32_t va; recomp_func_t fn; } g_lcache[1u << LCACHE_BITS];
+#endif
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     uint32_t h = (va * 2654435761u) >> (32 - LCACHE_BITS);
     if (g_lcache[h].va == va && va) {
@@ -765,6 +791,7 @@ int main(int argc, char **argv) {
     int have_p = (ds_pe_load(pp, &img_p) == 0); if (have_p) g_msvcp_img = &img_p;
 
     ds_host_init();
+    { extern void ds_sample_init(void); ds_sample_init(); }   /* DS_SAMPLE=1: profile into the log */
     ds_register_manual(0x7857DF6Cu, ds_eh_prolog);     /* msvcr90 __EH_prolog */
     ds_register_manual(0x7858CF00u, ds_seh_prolog4);   /* msvcr90 _SEH_prolog4 */
     ds_register_manual(0x7855AE20u, ds_memmove);       /* msvcr90 memcpy */

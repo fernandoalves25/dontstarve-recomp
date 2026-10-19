@@ -789,7 +789,37 @@ const ds_shim ds_kernel32[] = {
     { 0, 0 }
 };
 
+/* Native msvcr90 _getptd_noexit (0x7854383F): the CRT's per-thread data, asked
+ * for ~2,000 times a frame (errno, rand, strtod, locale...). The lifted
+ * original makes four import calls each time (GetLastError, TlsGetValue for
+ * the decoded FlsGetValue pointer, FlsGetValue, SetLastError); here the slot
+ * is read directly. The CRT keeps it in FLS when FlsAlloc exists (ours does;
+ * plain TLS otherwise). The first call on a thread allocates it as the CRT
+ * does: _calloc_crt(1, 0x214), store it, _initptd(ptd, NULL), the thread id,
+ * thread handle -1. cdecl, no arguments; returns the pointer or NULL. */
+#define CRT_FLSINDEX     0x785B71E0u     /* __flsindex */
+#define CRT_CALLOC_CRT   0x78583797u
+#define CRT_INITPTD      0x78543753u
+static void ds_getptd_noexit(void) {
+    uint32_t idx = MEM32(CRT_FLSINDEX);
+    uint32_t *slots = g_fls_next ? t_fls : t_tls;  /* FlsAlloc was called: FLS */
+    uint32_t v = idx < NSLOT ? slots[idx] : 0;
+    if (!v) {
+        uint32_t a[2] = { 1, 0x214 };
+        v = hle_call_guest(CRT_CALLOC_CRT, 2, a);
+        if (v) {
+            if (idx < NSLOT) slots[idx] = v;
+            uint32_t b[2] = { v, 0 };
+            hle_call_guest(CRT_INITPTD, 2, b);
+            MEM32(v) = ds_thread_id(); MEM32(v + 4) = 0xFFFFFFFFu;
+        }
+    }
+    g_eax = v;
+    g_esp += 4;                                  /* the return address the call pushed */
+}
+
 void ds_host_init(void) {
+    ds_register_manual(0x7854383Fu, ds_getptd_noexit);   /* msvcr90 _getptd_noexit */
     ds_register(ds_kernel32);
     ds_register(ds_win32);
     ds_register(ds_user32);
