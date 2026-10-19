@@ -315,7 +315,39 @@ static void sh_GetSystemTimeAsFileTime(void) {
     MEM32(p) = (uint32_t)ft; MEM32(p + 4) = (uint32_t)(ft >> 32);
     RETV(1);
 }
+/* DS_PROF: which guest functions ask for the time, and how often */
+static struct { uint32_t fn, n; } g_qpc_from[64];
+void ds_prof_qpc_top(void) {
+    for (int r = 0; r < 6; r++) {
+        int b = -1; for (int i = 0; i < 64; i++) if (g_qpc_from[i].n && (b < 0 || g_qpc_from[i].n > g_qpc_from[b].n)) b = i;
+        if (b < 0) break;
+        fprintf(stderr, "[prof]   QueryPerformanceCounter from 0x%08X: %u\n", g_qpc_from[b].fn, g_qpc_from[b].n);
+        g_qpc_from[b].n = 0;
+    }
+    memset(g_qpc_from, 0, sizeof g_qpc_from);
+}
+/* The game's frame limiter busy-waits on QueryPerformanceCounter until the
+ * next 1/60 s (~136,000 polls a frame from one function when there is time
+ * to spare). Past a few hundred polls within one frame, each poll sleeps
+ * 30 us first: the same deadline, the core free (a handheld's battery and
+ * heat, and the other guest threads). DS_SPIN=1 keeps the busy-wait. */
+static uint32_t g_qpc_frame, g_qpc_polls;
+uint64_t g_limiter_ns;                              /* wall time the frame limiter spent waiting */
 static void sh_QueryPerformanceCounter(void) {
+    static int prof = -1; if (prof < 0) prof = getenv("DS_PROF") != NULL;
+    if (prof)
+        for (int i = 0; i < 64; i++)
+            if (g_qpc_from[i].fn == g_cur_func || !g_qpc_from[i].n) { g_qpc_from[i].fn = g_cur_func; g_qpc_from[i].n++; break; }
+    static int spin = -1; if (spin < 0) spin = getenv("DS_SPIN") != NULL;
+    uint32_t fr = ds_frame_count();
+    if (fr != g_qpc_frame) { g_qpc_frame = fr; g_qpc_polls = 0; }
+    if (++g_qpc_polls > 256 && !spin) {
+        int d = ds_block_begin();                   /* let other guest threads run meanwhile */
+        struct timespec t0, t1, z = { 0, 30000 };
+        clock_gettime(CLOCK_MONOTONIC, &t0); nanosleep(&z, NULL); clock_gettime(CLOCK_MONOTONIC, &t1);
+        g_limiter_ns += (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec));
+        ds_block_end(d);
+    }
     uint32_t p = A32(0);
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
     uint64_t c = (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec;

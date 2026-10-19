@@ -1,0 +1,136 @@
+From 39774f71717e74a367cdc426d423835724609e81 Mon Sep 17 00:00:00 2001
+From: Fernando Alves <67828493+fernandoalves25@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 00:54:50 +0000
+Subject: [PATCH] recomp32/lift32: RECOMP_X87_LOCAL -- FPU-heavy functions keep
+ ST(0..7) in locals, synced at calls and returns
+
+---
+ runtime/recomp32/recomp_types.h | 71 ++++++++++++++++++++++++++++++++-
+ tools/lift/lift32.py            | 15 ++++++-
+ 2 files changed, 83 insertions(+), 3 deletions(-)
+
+diff --git a/runtime/recomp32/recomp_types.h b/runtime/recomp32/recomp_types.h
+index cbfe75a..fd02023 100644
+--- a/runtime/recomp32/recomp_types.h
++++ b/runtime/recomp32/recomp_types.h
+@@ -121,8 +121,8 @@ extern const uint32_t recomp_dispatch_count;
+ #define edi l_edi
+ #define ebp l_ebp
+ #define RECOMP_REGS_LOCALS uint32_t l_eax = g_eax, l_ecx = g_ecx, l_edx = g_edx, l_ebx = g_ebx, l_esp = g_esp, l_esi = g_esi, l_edi = g_edi, l_ebp = g_ebp;
+-#define RECOMP_REGS_OUT() (g_eax = l_eax, g_ecx = l_ecx, g_edx = l_edx, g_ebx = l_ebx, g_esp = l_esp, g_esi = l_esi, g_edi = l_edi, g_ebp = l_ebp)
+-#define RECOMP_REGS_IN() (l_eax = g_eax, l_ecx = g_ecx, l_edx = g_edx, l_ebx = g_ebx, l_esp = g_esp, l_esi = g_esi, l_edi = g_edi, l_ebp = g_ebp)
++#define RECOMP_REGS_OUT() (g_eax = l_eax, g_ecx = l_ecx, g_edx = l_edx, g_ebx = l_ebx, g_esp = l_esp, g_esi = l_esi, g_edi = l_edi, g_ebp = l_ebp, RECOMP_X87_OUT())
++#define RECOMP_REGS_IN() (l_eax = g_eax, l_ecx = g_ecx, l_edx = g_edx, l_ebx = g_ebx, l_esp = g_esp, l_esi = g_esi, l_edi = g_edi, l_ebp = g_ebp, RECOMP_X87_IN())
+ #else
+ #define RECOMP_REGS_LOCALS
+ #define RECOMP_REGS_OUT() ((void)0)
+@@ -946,6 +946,73 @@ static inline double fp_pop_impl(double* st, int* top) {
+ #define fp_xch(i) do { double _t = _st[0]; _st[0] = _st[i]; _st[i] = _t; \
+     int64_t _ti = g_st_i64[0]; g_st_i64[0] = g_st_i64[i]; g_st_i64[i] = _ti; } while (0)
+ 
++#if defined(RECOMP_GENERATED_CODE) && defined(RECOMP_X87_LOCAL)
++/* RECOMP_X87_LOCAL: a function that uses the FPU (the lifter marks it with
++ * RECOMP_X87_LOCALS) keeps ST(0..7) in a local window instead of the global
++ * stack. The globals can alias every guest store, so each fld/fmul/fstp was
++ * a round trip through memory; locals whose index is a compile-time constant
++ * become host registers (a lifted 4x4 matrix multiply was 6% of a frame).
++ * The window is loaded on entry and after every call, written back before
++ * every call and return -- RECOMP_REGS_OUT/IN do it, which every call, tail
++ * call, return and preemption point already passes. _x87_local is a file-
++ * scope 0 that the marked functions shadow with a local 1, so every macro
++ * below picks its storage at compile time and unmarked functions are as
++ * before. The local depth is relative: after a call the window is reloaded
++ * at the same local position, so it stays a constant along straight code. */
++#ifndef RECOMP_X87_WINDOW
++#error "RECOMP_X87_LOCAL needs RECOMP_X87_WINDOW (the global stack layout it syncs with)"
++#endif
++#define RECOMP_X87L_N   32      /* local slots: ST(0..7) live in [_xsp, _xsp + 8) */
++#define RECOMP_X87L_MID 12
++static const int _x87_local = 0;                        /* shadowed in marked functions */
++static double  _xl[RECOMP_X87L_N] __attribute__((unused));   /* never used: the */
++static int64_t _xli[RECOMP_X87L_N] __attribute__((unused));  /* branches naming */
++static int     _xsp __attribute__((unused)), _xs0 __attribute__((unused));   /* them fold away */
++
++static inline void x87l_load(double *xl, int64_t *xli, int xsp, int *xs0) {
++    for (int i = 0; i < 8; i++) { xl[xsp + i] = g_st_win[g_fp_sp + i]; xli[xsp + i] = g_st_i64_win[g_fp_sp + i]; }
++    *xs0 = xsp;
++}
++static inline void x87l_store(const double *xl, const int64_t *xli, int xsp, int *xs0) {
++    int d = xsp - *xs0;                                  /* pushes (-) / pops (+) since the last sync */
++    g_fp_sp += d; g_fp_top -= d;
++    if (g_fp_sp < 8 || g_fp_sp > RECOMP_X87_SLOTS - 16) g_fp_sp = RECOMP_X87_SLOTS / 2 - 4;
++    for (int i = 0; i < 8; i++) { g_st_win[g_fp_sp + i] = xl[xsp + i]; g_st_i64_win[g_fp_sp + i] = xli[xsp + i]; }
++    *xs0 = xsp;
++}
++static inline void x87l_recentre(double *xl, int64_t *xli, int *xsp, int *xs0) {
++    int k = RECOMP_X87L_MID - *xsp;                      /* unbalanced code: rare */
++    memmove(xl + RECOMP_X87L_MID, xl + *xsp, 8 * sizeof(double));
++    memmove(xli + RECOMP_X87L_MID, xli + *xsp, 8 * sizeof(int64_t));
++    *xsp += k; *xs0 += k;
++}
++static inline double x87l_pop(double *xl, int64_t *xli, int *xsp, int *xs0) {
++    double v = xl[(*xsp)++];
++    if (*xsp > RECOMP_X87L_N - 8) x87l_recentre(xl, xli, xsp, xs0);
++    return v;
++}
++#define RECOMP_X87_LOCALS const int _x87_local = 1; \
++    double _xl[RECOMP_X87L_N]; int64_t _xli[RECOMP_X87L_N]; \
++    int _xsp = RECOMP_X87L_MID, _xs0 = RECOMP_X87L_MID; x87l_load(_xl, _xli, _xsp, &_xs0);
++#define RECOMP_X87_OUT() (_x87_local ? x87l_store(_xl, _xli, _xsp, &_xs0) : (void)0)
++#define RECOMP_X87_IN()  (_x87_local ? x87l_load(_xl, _xli, _xsp, &_xs0) : (void)0)
++#undef _st
++#define _st (_x87_local ? _xl + _xsp : g_st)
++#undef g_st_i64
++#define g_st_i64 (_x87_local ? _xli + _xsp : (g_st_i64_win + g_fp_sp))
++#undef fp_push
++#define fp_push(val) do { double _pv_ = (val); \
++    if (_x87_local) { if (_xsp < 1) x87l_recentre(_xl, _xli, &_xsp, &_xs0); \
++                      --_xsp; _xl[_xsp] = _pv_; _xli[_xsp] = 0; } \
++    else fp_push_impl(g_st, &g_fp_top, _pv_); } while (0)
++#undef fp_pop
++#define fp_pop() (_x87_local ? x87l_pop(_xl, _xli, &_xsp, &_xs0) : fp_pop_impl(g_st, &g_fp_top))
++#else
++#define RECOMP_X87_LOCALS
++#define RECOMP_X87_OUT() ((void)0)
++#define RECOMP_X87_IN()  ((void)0)
++#endif
++
+ /* fist/fistp round by the control word's RC field (bits 10-11), not by C's
+  * truncating cast. MSVC's __ftol sets chop before its fistp, so a plain cast
+  * looked right for years; Quake-lineage rasterisers deliberately run fistp in
+diff --git a/tools/lift/lift32.py b/tools/lift/lift32.py
+index d0f864a..6b467d2 100644
+--- a/tools/lift/lift32.py
++++ b/tools/lift/lift32.py
+@@ -8,6 +8,7 @@ generation from flag-setters to flag-consumers.
+ """
+ 
+ import re
++X87_USE = re.compile(r"\bfp_(push|pop|xch|push_i64)\b|\b_st\[|\bg_st_i64\b")
+ from dataclasses import dataclass, field
+ from typing import Optional
+ from capstone.x86 import (
+@@ -2260,7 +2261,19 @@ class Lifter:
+             lines.append("")
+ 
+         lines.append("}")
++        # A function that touches the FPU may keep ST(0..7) in locals
++        # (RECOMP_X87_LOCAL; empty otherwise): mark it after the register locals.
++        body = '\n'.join(lines)
++        # Worth it where FPU work outweighs calls: each call or return
++        # syncs the eight registers both ways, which an FPU-light function
++        # that calls a lot (Lua's VM loop: 75 FPU ops, 49 calls) pays for in
++        # every call it makes. 8 FPU ops per call or more.
++        code = re.sub(r'/\*.*?\*/', '', body)              # code, not the comments
++        n_fpu = len(X87_USE.findall(code))
++        n_call = len(re.findall(r'RECOMP_(?:CALL|ICALL|ITAIL|SETJMP_CALL)\(', code))
++        if n_fpu and n_fpu >= 8 * max(n_call, 1):
++            body = body.replace("    RECOMP_REGS_LOCALS\n", "    RECOMP_REGS_LOCALS\n    RECOMP_X87_LOCALS\n", 1)
+         # Every exit writes local registers back (RECOMP_RETURN is a plain
+         # `return` unless RECOMP_LOCAL_REGS). Rewritten on the text so that no
+         # emitter of a `return;` can forget it.
+-        return re.sub(r'\breturn;', 'RECOMP_RETURN();', '\n'.join(lines))
++        return re.sub(r'\breturn;', 'RECOMP_RETURN();', body)
+-- 
+2.43.0
+

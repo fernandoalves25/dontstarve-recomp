@@ -175,6 +175,7 @@ static void dump_frame(uint32_t n) {
         for (int x = 0; x < DS_SCREEN_W; x++) fwrite(px + 4 * (y * DS_SCREEN_W + x), 1, 3, f);
     fclose(f);
 }
+uint64_t g_prof_bufbytes, g_prof_bufcalls;               /* DS_PROF counters (glBufferData) */
 static void sh_eglSwapBuffers(void) {            /* (dpy, surface) */
     static int every = -1;
     static struct timespec t0;
@@ -183,8 +184,12 @@ static void sh_eglSwapBuffers(void) {            /* (dpy, surface) */
     g_frame++;
     if (every > 0 && g_frame % (uint32_t)every == 0) dump_frame(g_frame);
     EGLBoolean ok;
+    struct timespec s0, s1; clock_gettime(CLOCK_MONOTONIC, &s0);
     if (ds_sdl_active()) { ds_sdl_swap(); ok = EGL_TRUE; }
     else ok = s ? eglSwapBuffers(g_dpy, s) : EGL_FALSE;
+    clock_gettime(CLOCK_MONOTONIC, &s1);
+    static double swap_sec, last_sec; static uint32_t last_frame;
+    swap_sec += (double)(s1.tv_sec - s0.tv_sec) + (double)(s1.tv_nsec - s0.tv_nsec) / 1e9;
     ds_yield();                                  /* a frame is a natural preemption point */
     static int exit_after = -1;
     if (exit_after < 0) { const char *e = getenv("DS_EXIT_AFTER_FRAMES"); exit_after = e ? atoi(e) : 0; }
@@ -198,7 +203,30 @@ static void sh_eglSwapBuffers(void) {            /* (dpy, surface) */
     if (g_frame == 1 || g_frame % 120 == 0) {
         struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
         double sec = (double)(t.tv_sec - t0.tv_sec) + (double)(t.tv_nsec - t0.tv_nsec) / 1e9;
-        fprintf(stderr, "[egl] frame %u (%.1f fps avg)\n", g_frame, sec > 0 ? g_frame / sec : 0.0);
+        /* the swap is where a software renderer draws (and a GPU driver may wait) */
+        double span = sec - last_sec; uint32_t nf = g_frame - last_frame;
+        struct timespec ct; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ct);   /* the render thread's own CPU */
+        static double last_cpu; double cpu = (double)ct.tv_sec + (double)ct.tv_nsec / 1e9;
+        extern uint64_t g_limiter_ns;           /* work = the frame minus the limiter's wait */
+        double lim = nf ? g_limiter_ns / 1e6 / nf : 0.0; g_limiter_ns = 0;
+        fprintf(stderr, "[egl] frame %u (%.1f fps avg; last %u frames: %.1f ms/frame, %.1f in swap, %.1f waiting, %.1f work)\n", g_frame,
+                sec > 0 ? g_frame / sec : 0.0, nf, nf ? span * 1000 / nf : 0.0, nf ? swap_sec * 1000 / nf : 0.0,
+                lim, nf ? span * 1000 / nf - lim : 0.0);
+        (void)cpu; (void)last_cpu;
+        last_cpu = cpu; last_sec = sec; last_frame = g_frame; swap_sec = 0;
+        static int prof = -1; if (prof < 0) prof = getenv("DS_PROF") != NULL;
+        if (prof && nf) {
+            extern uint64_t g_prof_mmbytes, g_prof_mmcalls, g_prof_imports, g_prof_draws, g_prof_verts;
+            fprintf(stderr, "[prof] per frame: %llu draws (%llu vertices), %llu import calls, guest memcpy %llu calls %llu KB, "
+                    "glBufferData %llu calls %llu KB\n",
+                    (unsigned long long)(g_prof_draws / nf), (unsigned long long)(g_prof_verts / nf),
+                    (unsigned long long)(g_prof_imports / nf),
+                    (unsigned long long)(g_prof_mmcalls / nf), (unsigned long long)(g_prof_mmbytes / nf >> 10),
+                    (unsigned long long)(g_prof_bufcalls / nf), (unsigned long long)(g_prof_bufbytes / nf >> 10));
+            extern void ds_prof_imports_top(uint32_t);
+            if (g_frame % 600 == 0) { extern void ds_prof_qpc_top(void); ds_prof_imports_top(nf); ds_prof_qpc_top(); }
+            g_prof_mmbytes = g_prof_mmcalls = g_prof_bufbytes = g_prof_bufcalls = g_prof_imports = g_prof_draws = g_prof_verts = 0;
+        }
     }
     RET(ok, 2);
 }
@@ -217,7 +245,10 @@ static void sh_eglGetError(void) { uint32_t e = g_egl_error; g_egl_error = EGL_S
 static void sh_glActiveTexture(void)        { glActiveTexture(E(0)); RETV(1); }
 static void sh_glAttachShader(void)         { glAttachShader(U(0), U(1)); RETV(2); }
 static void sh_glBindAttribLocation(void)   { glBindAttribLocation(U(0), U(1), (const GLchar *)P(2)); RETV(3); }
-static void sh_glBindBuffer(void)           { glBindBuffer(E(0), U(1)); RETV(2); }
+/* the bound array buffer, kept here: glVertexAttribPointer needs it on every call
+ * and a glGet round trip into the driver per attribute is not free */
+static GLuint g_array_buffer;
+static void sh_glBindBuffer(void)           { if (E(0) == GL_ARRAY_BUFFER) g_array_buffer = U(1); glBindBuffer(E(0), U(1)); RETV(2); }
 static void sh_glBindFramebuffer(void)      { glBindFramebuffer(E(0), U(1)); RETV(2); }
 static void sh_glBindRenderbuffer(void)     { glBindRenderbuffer(E(0), U(1)); RETV(2); }
 static void sh_glBindTexture(void)          { glBindTexture(E(0), U(1)); RETV(2); }
@@ -225,9 +256,10 @@ static void sh_glBlendEquation(void)        { glBlendEquation(E(0)); RETV(1); }
 static void sh_glBlendEquationSeparate(void){ glBlendEquationSeparate(E(0), E(1)); RETV(2); }
 static void sh_glBlendFunc(void)            { glBlendFunc(E(0), E(1)); RETV(2); }
 static void sh_glBlendFuncSeparate(void)    { glBlendFuncSeparate(E(0), E(1), E(2), E(3)); RETV(4); }
-static void sh_glBufferData(void)           { glBufferData(E(0), (GLsizeiptr)A32(1), P(2), E(3)); RETV(4); }
+static void sh_glBufferData(void)           { g_prof_bufbytes += A32(1); g_prof_bufcalls++; glBufferData(E(0), (GLsizeiptr)A32(1), P(2), E(3)); RETV(4); }
 static void sh_glCheckFramebufferStatus(void){ RET(glCheckFramebufferStatus(E(0)), 1); }
-static void sh_glClear(void)                { glClear((GLbitfield)A32(0)); RETV(1); }
+static int no_draw(void);                         /* DS_NO_DRAW, below */
+static void sh_glClear(void)               { if (!no_draw()) glClear(U(0)); RETV(1); }
 static void sh_glClearColor(void)           { glClearColor(AF(0), AF(1), AF(2), AF(3)); RETV(4); }
 static void sh_glClearStencil(void)         { glClearStencil(I(0)); RETV(1); }
 static void sh_glColorMask(void)            { glColorMask((GLboolean)A32(0), (GLboolean)A32(1), (GLboolean)A32(2), (GLboolean)A32(3)); RETV(4); }
@@ -337,7 +369,11 @@ static void sh_glCompressedTexImage2D(void) { /* (target, level, ifmt, w, h, bor
 static void sh_glCreateProgram(void)        { RET(glCreateProgram(), 0); }
 static void sh_glCreateShader(void)         { RET(glCreateShader(E(0)), 1); }
 static void sh_glCullFace(void)             { glCullFace(E(0)); RETV(1); }
-static void sh_glDeleteBuffers(void)        { glDeleteBuffers(I(0), (const GLuint *)P(1)); RETV(2); }
+static void sh_glDeleteBuffers(void) {      /* deleting the bound buffer unbinds it */
+    const GLuint *ids = (const GLuint *)P(1);
+    for (GLint i = 0; ids && i < I(0); i++) if (ids[i] == g_array_buffer) g_array_buffer = 0;
+    glDeleteBuffers(I(0), ids); RETV(2);
+}
 static void sh_glDeleteFramebuffers(void)   { glDeleteFramebuffers(I(0), (const GLuint *)P(1)); RETV(2); }
 static void sh_glDeleteTextures(void)       { glDeleteTextures(I(0), (const GLuint *)P(1)); RETV(2); }
 static void sh_glDeleteProgram(void)        { glDeleteProgram(U(0)); RETV(1); }
@@ -347,7 +383,16 @@ static void sh_glDepthFunc(void)            { glDepthFunc(E(0)); RETV(1); }
 static void sh_glDepthMask(void)            { glDepthMask((GLboolean)A32(0)); RETV(1); }
 static void sh_glDisable(void)              { glDisable(E(0)); RETV(1); }
 static void sh_glDisableVertexAttribArray(void){ glDisableVertexAttribArray(U(0)); RETV(1); }
-static void sh_glDrawArrays(void)           { glDrawArrays(E(0), I(1), I(2)); RETV(3); }
+uint64_t g_prof_draws, g_prof_verts;                     /* DS_PROF counters */
+/* DS_NO_DRAW=1: skip the draws and clears -- the frame rate is then the CPU's
+ * alone (a benchmark for the game code without a software renderer) */
+static int g_no_draw = -1;
+static int no_draw(void) { if (g_no_draw < 0) g_no_draw = getenv("DS_NO_DRAW") != NULL; return g_no_draw; }
+static void sh_glDrawArrays(void) {
+    g_prof_draws++; g_prof_verts += (uint32_t)I(2);
+    if (!no_draw()) glDrawArrays(E(0), I(1), I(2));
+    RETV(3);
+}
 static void sh_glEnable(void)               { glEnable(E(0)); RETV(1); }
 static void sh_glEnableVertexAttribArray(void){ glEnableVertexAttribArray(U(0)); RETV(1); }
 static void sh_glFinish(void)               { glFinish(); RETV(0); }
@@ -452,8 +497,7 @@ static void sh_glUniformMatrix4fv(void)     { glUniformMatrix4fv(I(0), I(1), (GL
 static void sh_glUseProgram(void)           { glUseProgram(U(0)); RETV(1); }
 static void sh_glVertexAttribPointer(void) {/* (index, size, type, normalized, stride, ptr) */
     /* with an array buffer bound, ptr is an offset into it; without, a client (guest) pointer */
-    GLint vbo = 0; glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &vbo);
-    const void *ptr = vbo ? (const void *)(uintptr_t)A32(5) : P(5);
+    const void *ptr = g_array_buffer ? (const void *)(uintptr_t)A32(5) : P(5);
     glVertexAttribPointer(U(0), I(1), E(2), (GLboolean)A32(3), I(4), ptr);
     RETV(6);
 }

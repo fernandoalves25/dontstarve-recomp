@@ -16,8 +16,8 @@ cd "$(dirname "$0")/.."
 CC=${CC:-aarch64-linux-gnu-gcc}
 OBJ=build/obj-arm64
 mkdir -p "$OBJ"
-DEFS="-DRECOMP_STRICT_ICALL -DRECOMP_LOCAL_REGS -DRECOMP_HOST_SETJMP -DRECOMP_MEM_QUAL="
-FLAGS="-O2 -w -fwrapv -fno-strict-aliasing -fexceptions"
+DEFS="-DRECOMP_STRICT_ICALL -DRECOMP_LOCAL_REGS -DRECOMP_HOST_SETJMP -DRECOMP_X87_WINDOW -DRECOMP_X87_LOCAL -DRECOMP_MEM_BASE=0x100000000ull -DRECOMP_MEM_QUAL="
+FLAGS="-O2 -mcpu=cortex-a35 -w -fwrapv -fno-strict-aliasing -fexceptions"   # RK3326 = Cortex-A35
 export CC OBJ DEFS FLAGS
 : > build/arm64_errors.log
 echo "guest start: $(date +%T)"
