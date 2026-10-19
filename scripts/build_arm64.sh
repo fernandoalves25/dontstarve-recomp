@@ -17,7 +17,12 @@ CC=${CC:-aarch64-linux-gnu-gcc}
 OBJ=build/obj-arm64
 mkdir -p "$OBJ"
 DEFS="-DRECOMP_STRICT_ICALL -DRECOMP_LOCAL_REGS -DRECOMP_HOST_SETJMP -DRECOMP_X87_WINDOW -DRECOMP_X87_LOCAL -DRECOMP_MEM_BASE=0x100000000ull -DRECOMP_MEM_QUAL="
-FLAGS="-O2 -mcpu=cortex-a35 -w -fwrapv -fno-strict-aliasing -fexceptions"   # RK3326 = Cortex-A35
+# -O2 plus the loop/inlining passes -fprofile-use would switch on: on the
+# lifted code (goto-heavy, many small calls) they cut the game's CPU time per
+# frame by ~29% on x86 (scripts/bench.sh: 6.3 -> 4.5 ms); a real profile on
+# top of them added nothing measurable.
+FAST="-funroll-loops -fpeel-loops -ftracer -finline-functions -fipa-cp-clone -funswitch-loops -fsplit-loops -fpredictive-commoning -fgcse-after-reload -ftree-loop-distribute-patterns"
+FLAGS="-O2 $FAST -mcpu=cortex-a35 -w -fwrapv -fno-strict-aliasing -fexceptions"   # RK3326 = Cortex-A35
 # PGO=dir: profile-guided build from a training run's .gcda files, renamed for
 # this object directory (#...#build#obj-arm64#<file>.gcda; see docs/PERFORMANCE.md)
 [ -n "${PGO:-}" ] && FLAGS="$FLAGS -fprofile-use=$PGO -fprofile-partial-training -fprofile-correction"
