@@ -331,8 +331,17 @@ static int name_match(const char *wave_name, const char *stem) {   /* stem or st
     return 1;
 }
 static int wave_of(uint16_t bank, uint16_t idx) {               /* our wave index for (bank, index) */
-    for (int i = 0; i < g_nwaves; i++) if (g_waves[i].bank == bank) return i + idx < g_nwaves && g_waves[i + idx].bank == bank ? i + idx : -1;
-    return -1;
+    /* a bank's waves are contiguous: remember where each bank starts (the
+     * linear scan ran on every event start, 0.7% of a frame on the R36S) */
+    static struct { int nwaves; uint16_t bank; int first; } c[256];
+    int s = bank & 255, i = -1;
+    if (c[s].nwaves == g_nwaves && c[s].bank == bank) i = c[s].first;
+    else {
+        for (int k = 0; k < g_nwaves; k++) if (g_waves[k].bank == bank) { i = k; break; }
+        c[s].nwaves = g_nwaves; c[s].bank = bank; c[s].first = i;
+    }
+    if (i < 0) return -1;
+    return i + idx < g_nwaves && g_waves[i + idx].bank == bank ? i + idx : -1;
 }
 typedef struct { int n; int idx[24]; int param, env, loop; float lo, hi, vol; uint32_t spawn_min, spawn_max, nspawn; } evlayer;
 typedef struct {

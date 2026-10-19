@@ -1,0 +1,67 @@
+From 0dad50ab187ef36e3f164fb8c3ec8fc104fba601 Mon Sep 17 00:00:00 2001
+From: Fernando Alves <67828493+fernandoalves25@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 13:41:42 -0300
+Subject: [PATCH] recomp32: RECOMP_X87_LOCAL syncs only the live x87 slots,
+ inlined, empty-stack fast path
+
+The local ST(0..7) window was copied in full (8 doubles + 8 int64
+shadows) both ways at every call and return of an FPU function. The x86
+ABI leaves the x87 stack empty at almost every call, so on the R36S's
+in-order Cortex-A35 those copies were 16% of the main thread in a world,
+mostly under the Lua interpreter (Lua numbers are doubles). Copy only
+g_fp_top entries (all eight when the depth is outside 0..8), return at
+once when the stack is empty and nothing moved, and force-inline the
+helpers: GCC stopped inlining them into the huge lifted functions.
+---
+ runtime/recomp32/recomp_types.h | 23 ++++++++++++++++++-----
+ 1 file changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/runtime/recomp32/recomp_types.h b/runtime/recomp32/recomp_types.h
+index f1b0415..c767986 100644
+--- a/runtime/recomp32/recomp_types.h
++++ b/runtime/recomp32/recomp_types.h
+@@ -996,15 +996,28 @@ static double  _xl[RECOMP_X87L_N] __attribute__((unused));   /* never used: the
+ static int64_t _xli[RECOMP_X87L_N] __attribute__((unused));  /* branches naming */
+ static int     _xsp __attribute__((unused)), _xs0 __attribute__((unused));   /* them fold away */
+ 
+-static inline void x87l_load(double *xl, int64_t *xli, int xsp, int *xs0) {
+-    for (int i = 0; i < 8; i++) { xl[xsp + i] = g_st_win[g_fp_sp + i]; xli[xsp + i] = g_st_i64_win[g_fp_sp + i]; }
++/* Only the live slots cross a sync. The window used to copy all eight ST(i)
++ * (and their int64 shadows) both ways at every call and return of an FPU
++ * function: the x86 ABI leaves the x87 stack empty at almost every call (one
++ * entry when a double comes back), so on the R36S's in-order A35 those 32
++ * loads/stores per call were 16% of a frame in a world, most of it under the
++ * Lua interpreter. g_fp_top is the depth (push +1, pop -1); when unbalanced
++ * code drives it outside 0..8 the sync falls back to all eight slots. */
++/* always_inline: GCC stops inlining into the huge lifted functions (the
++ * interpreter loop), and a call per sync cost as much as the copies did. */
++#define X87L_INLINE static inline __attribute__((always_inline))
++X87L_INLINE int x87l_live(void) { return (unsigned)g_fp_top <= 8u ? g_fp_top : 8; }
++X87L_INLINE void x87l_load(double *xl, int64_t *xli, int xsp, int *xs0) {
++    if (__builtin_expect(g_fp_top == 0, 1)) { *xs0 = xsp; return; }   /* empty stack: nothing to copy */
++    for (int i = 0, n = x87l_live(); i < n; i++) { xl[xsp + i] = g_st_win[g_fp_sp + i]; xli[xsp + i] = g_st_i64_win[g_fp_sp + i]; }
+     *xs0 = xsp;
+ }
+-static inline void x87l_store(const double *xl, const int64_t *xli, int xsp, int *xs0) {
++X87L_INLINE void x87l_store(const double *xl, const int64_t *xli, int xsp, int *xs0) {
+     int d = xsp - *xs0;                                  /* pushes (-) / pops (+) since the last sync */
++    if (__builtin_expect(d == 0 && g_fp_top == 0, 1)) return;          /* still empty, nothing moved */
+     g_fp_sp += d; g_fp_top -= d;
+     if (g_fp_sp < 8 || g_fp_sp > RECOMP_X87_SLOTS - 16) g_fp_sp = RECOMP_X87_SLOTS / 2 - 4;
+-    for (int i = 0; i < 8; i++) { g_st_win[g_fp_sp + i] = xl[xsp + i]; g_st_i64_win[g_fp_sp + i] = xli[xsp + i]; }
++    for (int i = 0, n = x87l_live(); i < n; i++) { g_st_win[g_fp_sp + i] = xl[xsp + i]; g_st_i64_win[g_fp_sp + i] = xli[xsp + i]; }
+     *xs0 = xsp;
+ }
+ static inline void x87l_recentre(double *xl, int64_t *xli, int *xsp, int *xs0) {
+@@ -1013,7 +1026,7 @@ static inline void x87l_recentre(double *xl, int64_t *xli, int *xsp, int *xs0) {
+     memmove(xli + RECOMP_X87L_MID, xli + *xsp, 8 * sizeof(int64_t));
+     *xsp += k; *xs0 += k;
+ }
+-static inline double x87l_pop(double *xl, int64_t *xli, int *xsp, int *xs0) {
++X87L_INLINE double x87l_pop(double *xl, int64_t *xli, int *xsp, int *xs0) {
+     double v = xl[(*xsp)++];
+     if (*xsp > RECOMP_X87L_N - 8) x87l_recentre(xl, xli, xsp, xs0);
+     return v;
+-- 
+2.43.0.windows.1
+
