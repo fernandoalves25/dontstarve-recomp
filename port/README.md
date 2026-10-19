@@ -22,12 +22,10 @@ build of the exe will not match it.
 
 ## First run
 
-On the first run the port creates `home/` (saves, `settings.ini`, the game's
-`log.txt`). If `python3` is on the device it also fills in the Vorbis setup
-headers for the low-sample-rate sounds (`tools/audio/import_setups.py`,
-needs an internet connection once). Without it, run that script on a PC with
-`DS_GAME_DIR` and `DS_HOME_DIR` pointing at your copied `gamedata/` and
-`home/` folders.
+On the first run the port fills `home/` (saves, `settings.ini`, the game's
+`log.txt`). The Vorbis setup headers every sound needs come in the package
+(`home/vorbis_setups.bin`); if it is missing, `tools/audio/import_setups.py`
+rebuilds it (python3 and an internet connection, once).
 
 ## Bigger HUD
 
@@ -70,12 +68,10 @@ build do exe não vai bater.
 
 ## Primeira execução
 
-Na primeira execução o port cria `home/` (saves, `settings.ini`, o `log.txt`
-do jogo). Se houver `python3` no aparelho, ele também completa os cabeçalhos
-de setup Vorbis dos sons de taxa baixa (`tools/audio/import_setups.py`,
-precisa de internet uma vez). Sem ele, rode esse script num PC com
-`DS_GAME_DIR` e `DS_HOME_DIR` apontando para as pastas `gamedata/` e `home/`
-copiadas.
+Na primeira execução o port preenche `home/` (saves, `settings.ini`, o
+`log.txt` do jogo). Os cabeçalhos de setup Vorbis de que todo som precisa vêm
+no pacote (`home/vorbis_setups.bin`); se faltar, o
+`tools/audio/import_setups.py` o recria (python3 e internet, uma vez).
 
 ## HUD maior
 
