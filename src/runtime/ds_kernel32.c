@@ -142,7 +142,7 @@ static uint32_t heap_alloc(uint32_t size) {
  * freeing them, which the Windows heap tolerates because it does not hand a
  * block straight back out. With immediate LIFO reuse, starting a new game
  * crashed on a stale vector (DS_HEAP_NOREUSE=1 confirmed it). */
-#define H_QUAR_N     65536u
+#define H_QUAR_N     (1u << 20)
 #define H_QUAR_BYTES (32u << 20)
 static uint32_t g_quar[H_QUAR_N], g_quar_head, g_quar_tail;
 static uint64_t g_quar_bytes;
@@ -172,7 +172,9 @@ static void heap_free(uint32_t va) {
     MEM32(va - 4) = H_FREE | c;
     if (noreuse) return;                            /* debug: never recycle (use-after-free hunt) */
     g_quar[g_quar_tail++ % H_QUAR_N] = va; g_quar_bytes += cap;
-    while (g_quar_tail - g_quar_head > H_QUAR_N - 1 || g_quar_bytes > H_QUAR_BYTES)
+    static uint64_t quar_bytes;                     /* DS_HEAP_QUAR_MB overrides the byte cap */
+    if (!quar_bytes) { const char *e = getenv("DS_HEAP_QUAR_MB"); quar_bytes = e && atoi(e) > 0 ? (uint64_t)atoi(e) << 20 : H_QUAR_BYTES; }
+    while (g_quar_tail - g_quar_head > H_QUAR_N - 1 || g_quar_bytes > quar_bytes)
         h_release(g_quar[g_quar_head++ % H_QUAR_N]);
 }
 static void sh_HeapAlloc(void) {

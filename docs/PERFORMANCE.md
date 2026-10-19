@@ -77,6 +77,36 @@ someone runs it on the device. Ways forward, largest first:
 4. **A 30 fps cap** as a fallback: the r36s-hud mod's "Frame rate cap"
    option calls the engine's own `TheSim:SetTargetFrameRate(30)`.
 
+## Measured on the R36S
+
+Fixed scenario, driven over SSH: main menu → Play → the saved slot →
+Continue, character idle, mean frame time over frames 1200–2160 (the
+`[egl] frame` lines). The device runs at full clocks (CPU 1368 MHz, DDR
+786 MHz, GPU 600 MHz on `performance`), nothing swaps, and the main thread is
+the only busy one (audio ~20% of another core). A ptrace PC sampler with a
+`-g1` build maps each sample to a line of the lifted C, and so to the x86
+instruction.
+
+| Build | ms/frame in a world |
+|---|---|
+| package first tested on the device | ~180 |
+| jump tables switch on the index (patch 0023) | ~174 |
+| x87 window copies only the live slots (patch 0022) | ~142 |
+| … inlined, empty-stack fast path | ~125 |
+| no PIE + inline call-target cache (patch 0021) | ~104 |
+| per-function register sync masks (patch 0024) | **~86** |
+
+The x87 window sync was 16% of the main thread: the Lua interpreter is an
+FPU function (Lua numbers are doubles) and copied all eight ST(i) both ways
+at every call. Paused in a world (drawing only) a frame takes ~27 ms, so the
+simulation, mostly Lua, is still the bottleneck.
+
+**Saved games:** continuing a save went through a `Reset()` that frees
+hundreds of thousands of small blocks at once. The heap's quarantine held
+65,536 blocks, so freed memory came back while the minimap still pointed into
+it (it then read Lua source text as a vector and crashed). The quarantine
+now holds 1,048,576 blocks (same 32 MB byte cap).
+
 <a id="pt"></a>
 ## PT
 
@@ -105,6 +135,30 @@ que decide o frame rate.
 - passes de laço/inlining no compilador.
 
 Resultado: **~12 → 4,5 ms de trabalho por frame**.
+
+**Medido no R36S** (cenário fixo pilotado por SSH: menu → Play → slot salvo →
+Continue, personagem parado, média dos frames 1200–2160; clocks no máximo,
+sem swap, só a thread principal ocupada):
+
+| Build | ms/frame no mundo |
+|---|---|
+| pacote testado primeiro no aparelho | ~180 |
+| tabelas de salto pelo índice (patch 0023) | ~174 |
+| janela x87 copia só os slots vivos (patch 0022) | ~142 |
+| … inline, atalho com pilha vazia | ~125 |
+| sem PIE + cache de alvos inline (patch 0021) | ~104 |
+| máscaras de registradores por função (patch 0024) | **~86** |
+
+A sincronização da janela x87 era 16% da thread principal (o interpretador
+Lua é uma função de FPU e copiava os oito ST(i) a cada chamada). Pausado no
+mundo (só desenho) o frame leva ~27 ms: a simulação, quase toda Lua, ainda é o
+gargalo.
+
+**Jogos salvos:** continuar um save passava por um `Reset()` que libera
+centenas de milhares de blocos pequenos de uma vez. A quarentena do heap
+guardava 65.536 blocos, então a memória liberada voltava enquanto o minimapa
+ainda apontava para ela (lia texto de script Lua como se fosse um vetor e
+crashava). A quarentena agora guarda 1.048.576 blocos (mesmo teto de 32 MB).
 
 **No R36S:** um Cortex-A35 é algo como 8–10× mais lento que esse Xeon numa
 thread, então 4,5 ms aqui são grosso modo **35–45 ms lá (~22–28 fps)**, antes

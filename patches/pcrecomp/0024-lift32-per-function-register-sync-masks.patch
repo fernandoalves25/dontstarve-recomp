@@ -1,0 +1,124 @@
+From abde2007b87b70fdad5c4bb2683779f9796a02af Mon Sep 17 00:00:00 2001
+From: Fernando Alves <67828493+fernandoalves25@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 15:09:22 -0300
+Subject: [PATCH] recomp32/lift32: per-function register sync masks
+ (RECOMP_LOCAL_REGS)
+
+Each lifted function loaded all eight guest registers on entry, stored
+all eight before every call and return and reloaded them after. lift32
+now emits two constants per function from Capstone's explicit + implicit
+register accesses: _rgu (read or written: loaded on entry and after
+calls) and _rgw (written: stored back). A register outside _rgw is never
+changed by the body, so its global is still exact at every boundary.
+The hot-patch nop (mov edi, edi) is not a write; pusha/popa and anything
+Capstone cannot answer for keep all eight. run_lift.py records each
+instruction's register names while rebuilding it.
+---
+ runtime/recomp32/recomp_types.h | 20 +++++++++++----
+ tools/lift/lift32.py            | 43 +++++++++++++++++++++++++++++++++
+ 2 files changed, 58 insertions(+), 5 deletions(-)
+
+diff --git a/runtime/recomp32/recomp_types.h b/runtime/recomp32/recomp_types.h
+index 9443d9a..4271b76 100644
+--- a/runtime/recomp32/recomp_types.h
++++ b/runtime/recomp32/recomp_types.h
+@@ -120,9 +120,19 @@ extern const uint32_t recomp_dispatch_count;
+ #define esi l_esi
+ #define edi l_edi
+ #define ebp l_ebp
+-#define RECOMP_REGS_LOCALS uint32_t l_eax = g_eax, l_ecx = g_ecx, l_edx = g_edx, l_ebx = g_ebx, l_esp = g_esp, l_esi = g_esi, l_edi = g_edi, l_ebp = g_ebp;
+-#define RECOMP_REGS_OUT() (g_eax = l_eax, g_ecx = l_ecx, g_edx = l_edx, g_ebx = l_ebx, g_esp = l_esp, g_esi = l_esi, g_edi = l_edi, g_ebp = l_ebp, RECOMP_X87_OUT())
+-#define RECOMP_REGS_IN() (l_eax = g_eax, l_ecx = g_ecx, l_edx = g_edx, l_ebx = g_ebx, l_esp = g_esp, l_esi = g_esi, l_edi = g_edi, l_ebp = g_ebp, RECOMP_X87_IN())
++/* Per-function sync masks (lift32 _reg_masks): bit 0..7 = eax ecx edx ebx esp
++ * esi edi ebp. _rgu: registers the body reads or writes -- loaded on entry and
++ * after calls; _rgw: the ones it writes -- stored before calls and returns. A
++ * register outside _rgw is never changed here, so its global is still exact.
++ * Each lifted function shadows these file-scope all-ones defaults with
++ * constants, so the masked copies fold away at compile time (on the R36S a
++ * 7-instruction function did all eight loads, stores and reloads). */
++static const unsigned _rgu __attribute__((unused)) = 0xFFu, _rgw __attribute__((unused)) = 0xFFu;
++#define RG_LD(r, b)  ((_rgu & (b)) ? (l_##r = g_##r) : 0)
++#define RG_ST(r, b)  ((_rgw & (b)) ? (g_##r = l_##r) : 0)
++#define RECOMP_REGS_LOCALS uint32_t l_eax = (_rgu & 0x01) ? g_eax : 0, l_ecx = (_rgu & 0x02) ? g_ecx : 0,     l_edx = (_rgu & 0x04) ? g_edx : 0, l_ebx = (_rgu & 0x08) ? g_ebx : 0, l_esp = g_esp,     l_esi = (_rgu & 0x20) ? g_esi : 0, l_edi = (_rgu & 0x40) ? g_edi : 0, l_ebp = (_rgu & 0x80) ? g_ebp : 0;
++#define RECOMP_REGS_OUT() (RG_ST(eax, 0x01), RG_ST(ecx, 0x02), RG_ST(edx, 0x04), RG_ST(ebx, 0x08), g_esp = l_esp,     RG_ST(esi, 0x20), RG_ST(edi, 0x40), RG_ST(ebp, 0x80), RECOMP_X87_OUT())
++#define RECOMP_REGS_IN() (RG_LD(eax, 0x01), RG_LD(ecx, 0x02), RG_LD(edx, 0x04), RG_LD(ebx, 0x08), l_esp = g_esp,     RG_LD(esi, 0x20), RG_LD(edi, 0x40), RG_LD(ebp, 0x80), RECOMP_X87_IN())
+ /* Only the registers a call may change under the x86 ABI (eax, ecx, edx and
+  * esp): ebx/esi/edi/ebp come back as they went in from a callee the lifter
+  * proved preserves them (it never writes them, or saves and restores them;
+@@ -139,10 +149,10 @@ void recomp_abi_violation(uint32_t caller, const char *callee, uint32_t va, int
+     if (g_edi != l_edi) recomp_abi_violation(_caller, name, va, 2, l_edi, g_edi); \
+     if (g_ebp != l_ebp) recomp_abi_violation(_caller, name, va, 3, l_ebp, g_ebp); } while (0)
+ #else
+-#define RECOMP_REGS_OUT_V() (g_eax = l_eax, g_ecx = l_ecx, g_edx = l_edx, g_esp = l_esp, RECOMP_X87_OUT())
++#define RECOMP_REGS_OUT_V() (RG_ST(eax, 0x01), RG_ST(ecx, 0x02), RG_ST(edx, 0x04), g_esp = l_esp, RECOMP_X87_OUT())
+ #define RECOMP_ABI_CHECK_REGS(name, va) ((void)0)
+ #endif
+-#define RECOMP_REGS_IN_V() (l_eax = g_eax, l_ecx = g_ecx, l_edx = g_edx, l_esp = g_esp, RECOMP_X87_IN())
++#define RECOMP_REGS_IN_V() (RG_LD(eax, 0x01), RG_LD(ecx, 0x02), RG_LD(edx, 0x04), l_esp = g_esp, RECOMP_X87_IN())
+ #else
+ #define RECOMP_REGS_LOCALS
+ #define RECOMP_REGS_OUT() ((void)0)
+diff --git a/tools/lift/lift32.py b/tools/lift/lift32.py
+index 352b656..a43b537 100644
+--- a/tools/lift/lift32.py
++++ b/tools/lift/lift32.py
+@@ -2263,6 +2263,47 @@ class Lifter:
+         from abi32 import import_preserves
+         return "_P" if import_preserves(name) else ""
+ 
++    # bit per guest register in the RECOMP_LOCAL_REGS sync masks (recomp_types.h)
++    _REG_BIT = {}
++    for _bit, _names in enumerate((('eax', 'ax', 'al', 'ah'), ('ecx', 'cx', 'cl', 'ch'),
++                                   ('edx', 'dx', 'dl', 'dh'), ('ebx', 'bx', 'bl', 'bh'),
++                                   ('esp', 'sp', 'spl'), ('esi', 'si', 'sil'),
++                                   ('edi', 'di', 'dil'), ('ebp', 'bp', 'bpl'))):
++        for _n in _names:
++            _REG_BIT[_n] = 1 << _bit
++
++    def _reg_masks(self, func):
++        """(used, written): the guest registers this function reads or writes,
++        and the ones it writes, from Capstone's explicit + implicit accesses.
++        A register the body never touches needs no copy at all; one it only
++        reads still holds the right value in its global, so only written ones
++        are stored back. esp is always both (call/ret move it). Anything
++        Capstone cannot answer for falls back to all eight."""
++        used, written = 0x10, 0x10
++        try:
++            for b in func.blocks.values():
++                for insn in b.instructions:
++                    ops = insn.operands or []
++                    if (insn.mnemonic == 'mov' and len(ops) == 2 and ops[0].type == X86_OP_REG
++                            and ops[1].type == X86_OP_REG and ops[0].reg == ops[1].reg):
++                        continue                              # `mov edi, edi`: the hot-patch nop
++                    rw = getattr(insn, 'regs_rw', None)       # names (run_lift.rebuild)
++                    if rw is None:
++                        if not hasattr(insn, 'regs_access'):
++                            return 0xFF, 0xFF
++                        rd, wr = insn.regs_access()
++                        rw = ({insn.reg_name(r) for r in rd}, {insn.reg_name(r) for r in wr})
++                    for n in rw[0]:
++                        used |= self._REG_BIT.get(n, 0)
++                    for n in rw[1]:
++                        bit = self._REG_BIT.get(n, 0)
++                        used |= bit; written |= bit
++                    if insn.mnemonic.startswith(('pusha', 'popa')):
++                        used |= 0xFF; written |= 0xFF
++        except Exception:
++            return 0xFF, 0xFF
++        return used, written
++
+     def lift_function(self, func) -> str:
+         """Lift an entire function to C code."""
+         lines = []
+@@ -2280,6 +2321,8 @@ class Lifter:
+         # A plain global store; the ring-buffer half only exists under -DRECOMP_TRACE.
+         # RECOMP_LOCAL_REGS keeps the eight registers in locals of this function
+         # (empty otherwise); declared before RECOMP_ENTER, which may call out.
++        used, written = self._reg_masks(func)
++        lines.append(f"    const unsigned _rgu = 0x{used:02X}u, _rgw = 0x{written:02X}u;  /* registers used / written (RECOMP_LOCAL_REGS sync) */")
+         lines.append(f"    RECOMP_REGS_LOCALS")
+         lines.append(f"    RECOMP_ENTER(0x{func.address:08X}u);")
+         lines.append(f"")
+-- 
+2.43.0.windows.1
+

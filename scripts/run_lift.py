@@ -71,9 +71,15 @@ def rebuild(md, img, base, fd):
     for s, e, succ, ex in fd["blocks"]:
         b = BasicBlock(start=s, end=e, successors=list(succ), is_exit=bool(ex))
         for ins in md.disasm(img[s - base:e - base], s):
-            b.instructions.append(Instruction(ins.address, ins.size, ins.mnemonic,
-                                              ins.op_str, bytes(ins.bytes),
-                                              list(ins.operands)))
+            i = Instruction(ins.address, ins.size, ins.mnemonic, ins.op_str,
+                            bytes(ins.bytes), list(ins.operands))
+            # registers read/written, explicit + implicit (lift32 _reg_masks)
+            try:
+                rd, wr = ins.regs_access()
+                i.regs_rw = ({ins.reg_name(r) for r in rd}, {ins.reg_name(r) for r in wr})
+            except Exception:
+                i.regs_rw = None
+            b.instructions.append(i)
         f.blocks[s] = b
     return f
 
