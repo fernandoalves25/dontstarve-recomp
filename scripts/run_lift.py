@@ -145,7 +145,13 @@ def cmd_lift(exe, catalog, outdir, split=400, names_path=None, prefix=""):
     # a DLL, whose callers live in other modules), stored before calls only
     # for callees that read them on entry
     publish, entry_reads, indirect = flags_analysis(abi_funcs, iat)
-    publish_all = indirect or bool(prefix)
+    # A DLL used to publish at every ret because its callers live in other
+    # modules. MSVC never reads flags across a call into another module (flags
+    # across calls are a same-module helper idiom, and this module's own
+    # callers are in the analysis), so a DLL publishes only where its own
+    # code reads them: 4 functions per CRT DLL instead of every return (4
+    # stores each). LIFT_DLL_PUBLISH_ALL=1 restores the old behaviour.
+    publish_all = indirect or (bool(prefix) and os.environ.get("LIFT_DLL_PUBLISH_ALL") == "1")
     del abi_funcs
     print(f"[*] flags: {len(publish)} functions publish them at ret"
           f"{' (all: an indirect call site reads them, or a DLL)' if publish_all else ''}, "
