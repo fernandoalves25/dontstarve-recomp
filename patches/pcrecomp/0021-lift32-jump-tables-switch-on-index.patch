@@ -1,0 +1,86 @@
+From 8a6a0fc1d34155ae8a85a65eb3d01c4b91bcca0d Mon Sep 17 00:00:00 2001
+From: Fernando Alves <67828493+fernandoalves25@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 12:02:29 -0300
+Subject: [PATCH] lift32: jump tables dispatch on the index (dense switch) when
+ the table is read-only
+
+A switch on the loaded target address has sparse case values, so GCC
+emits a compare tree: log2(n) branches per dispatch. luaV_execute pays it
+on every Lua opcode. When jmp [idx*4+table] reads a read-only table whose
+entries are all arms of the function, switch on idx instead (one
+jump-table branch); indexes past the known entries keep the address
+switch. run_lift.py hands the lifter a reader for read-only sections.
+---
+ tools/lift/lift32.py | 35 ++++++++++++++++++++++++++++++++---
+ 1 file changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/tools/lift/lift32.py b/tools/lift/lift32.py
+index ec574d6..c728d3f 100644
+--- a/tools/lift/lift32.py
++++ b/tools/lift/lift32.py
+@@ -240,6 +240,8 @@ class Lifter:
+         # VAs of functions that preserve ebx/esi/edi/ebp (abi32.analyze): calls
+         # to them and their own returns skip those four. None: the full exchange.
+         self.preserving = preserving
++        # read_ro32(va) -> uint32 from a read-only section, or None (jump tables)
++        self.read_ro32 = None
+         # abi32.flags_analysis: (publish, entry_reads, publish_all). The light
+         # calls (_P) store the caller's flags only before a callee that reads
+         # them on entry, and a ret publishes them only in a function some call
+@@ -1556,7 +1558,7 @@ class Lifter:
+                 # here; dispatching them as calls turns a loop into recursion.
+                 if ops and ops[0].type == X86_OP_MEM:
+                     lines.extend(self._computed_jump(
+-                        f"MEM32({self._fmt_mem_addr(ops[0].mem)})", comment))
++                        f"MEM32({self._fmt_mem_addr(ops[0].mem)})", comment, ops[0].mem))
+                 elif ops and ops[0].type == X86_OP_REG:
+                     lines.extend(self._computed_jump(self._fmt_read(ops[0]), comment))
+                 else:
+@@ -2202,7 +2204,21 @@ class Lifter:
+ 
+         return lines
+ 
+-    def _computed_jump(self, expr: str, comment: str) -> list:
++    def _jump_table(self, mem, arms):
++        """`jmp [idx*4 + table]` over a read-only table whose entries are all
++        arms of this function: the entries, in index order (else None)."""
++        if (self.read_ro32 is None or mem is None or mem.base != 0 or mem.index == 0
++                or mem.scale != 4 or mem.segment != 0 or self._patched_disp):
++            return None
++        table, out, arm_set = mem.disp & 0xFFFFFFFF, [], set(arms)
++        while len(out) < 1024:
++            v = self.read_ro32(table + 4 * len(out))
++            if v is None or v not in arm_set:
++                break
++            out.append(v)
++        return out or None
++
++    def _computed_jump(self, expr: str, comment: str, mem=None) -> list:
+         """Emit an indirect jump: goto for targets inside this function, tail
+         dispatch for anything else."""
+         # Only the arms this function's switches actually dispatch to. Listing
+@@ -2211,7 +2227,20 @@ class Lifter:
+         arms = sorted((self._jump_targets or set()) & (self._labels or set()))
+         if not arms:
+             return [f"RECOMP_ITAIL({expr}); return; {comment}"]
+-        lines = [f"{{ uint32_t _jt = {expr}; {comment}", "switch (_jt) {"]
++        lines = []
++        # A switch on the loaded ADDRESS has sparse case values, so the C
++        # compiler emits a compare tree (~log2(n) branches per dispatch -- the
++        # Lua interpreter pays it on every opcode). When the table is read-only
++        # and every entry is an arm, switch on the INDEX instead: dense cases,
++        # one jump-table branch. Indexes past the known entries keep the
++        # address switch.
++        entries = self._jump_table(mem, arms)
++        if entries:
++            idx = reg_name(mem.index)
++            lines += [f"switch ({idx}) {{ {comment}"]
++            lines += [f"case {i}u: goto L_{t:08X};" for i, t in enumerate(entries)]
++            lines += ["default: break;", "}"]
++        lines += [f"{{ uint32_t _jt = {expr}; {comment}", "switch (_jt) {"]
+         for label in arms:
+             lines.append(f"case 0x{label:08X}u: goto L_{label:08X};")
+         lines.append("default: RECOMP_ITAIL(_jt); return;")
+-- 
+2.43.0.windows.1
+

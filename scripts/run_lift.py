@@ -149,6 +149,15 @@ def cmd_lift(exe, catalog, outdir, split=400, names_path=None, prefix=""):
     lifter = Lifter(iat_map=iat, func_names={}, lifted=lifted, precise_carry=True,
                     hook_sites=set(hooks), setjmp_calls=setjmp_calls, preserving=preserving,
                     flags=(publish, entry_reads | set(overrides), publish_all))
+    # jump tables live in read-only sections (VC9: .text/.rdata): let the
+    # lifter read them, so a switch dispatches on the index (lift32 _jump_table)
+    ro = [(base + sec.VirtualAddress, base + sec.VirtualAddress + max(sec.Misc_VirtualSize, sec.SizeOfRawData))
+          for sec in pe.sections if not (sec.Characteristics & 0x80000000)]      # not IMAGE_SCN_MEM_WRITE
+    def read_ro32(va):
+        if any(lo <= va and va + 4 <= hi for lo, hi in ro):
+            return int.from_bytes(img[va - base:va - base + 4], "little")
+        return None
+    lifter.read_ro32 = read_ro32
     os.makedirs(outdir, exist_ok=True)
     for fn in os.listdir(outdir):
         if fn.startswith(prefix + "recomp_") and fn.endswith((".c", ".h")):

@@ -584,10 +584,13 @@ void recomp_unimpl(uint32_t va, const char *what) {
 
 /* ============================================================ native->guest */
 uint32_t hle_call_guest(uint32_t va, int nargs, const uint32_t *args) {
-    recomp_func_t f = recomp_lookup(va);
+    mach_enter();
+    /* the call-target cache (one hashed probe), not the binary search: GL
+     * callbacks and the CRT's qsort/bsearch comparators come through here.
+     * Inside the machine lock: the cache is only ever touched under it. */
+    recomp_func_t f = recomp_lookup_manual(va);
     if (!f) f = recomp_lookup_import(va);
     if (!f) ds_fatal("no lifted function at 0x%08X", va);
-    mach_enter();
     regs_t saved; regs_save(&saved);
     for (int i = nargs - 1; i >= 0; i--) PUSH32(g_esp, args[i]);
     PUSH32(g_esp, RECOMP_RETADDR);
