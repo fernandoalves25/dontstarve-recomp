@@ -79,7 +79,9 @@ pan/attenuation from the listener. Events follow their FEV data: each layer has 
 plays while its parameter is in range (the `daytime` ambience switches day/night layers), loop
 modes, per-definition volume and spawn intervals (ocean waves, random bird and wind ambience), and
 the category volumes the game's mixer sets (`set_music/soundtrack`, `set_sfx/voice`, pause and
-death mixes). Decoded audio stays under a memory budget (`DS_AUDIO_MB`, default 192, 96 on aarch64). FSB5 strips the Vorbis setup headers; the host rebuilds them with
+death mixes). Waves longer than 5 s (music, ambience loops; 425 of them) stream: decoded a little at
+a time in the mixer thread instead of whole on first use, which on a slow core stalled the game for
+seconds. The rest stay decoded under a memory budget (`DS_AUDIO_MB`, default 192, 96 on aarch64). FSB5 strips the Vorbis setup headers; the host rebuilds them with
 libvorbis's own encoder and checks each against the bank's CRC32 (cached in
 `$DS_HOME_DIR/vorbis_setups.bin`). The low-rate (8–24 kHz) setups came out of another encoder
 build; [tools/audio/import_setups.py](tools/audio/import_setups.py) takes them from
@@ -288,8 +290,10 @@ de 32 vozes com pan/atenuação 3D a partir do ouvinte. Os eventos seguem os dad
 a própria voz e toca enquanto o parâmetro está na faixa (o ambiente `daytime` troca as camadas de
 dia/noite), modos de loop, volume e intervalos de spawn por definição (ondas do mar, ambiente
 aleatório de pássaros e vento) e os volumes de categoria que o mixer do jogo define
-(`set_music/soundtrack`, `set_sfx/voice`, mixes de pausa e morte). O áudio decodificado fica dentro
-de um orçamento de memória (`DS_AUDIO_MB`, padrão 192, 96 no aarch64). O FSB5 remove os cabeçalhos de setup do
+(`set_music/soundtrack`, `set_sfx/voice`, mixes de pausa e morte). Ondas com mais de 5 s (música,
+loops de ambiente; 425 delas) tocam em streaming: decodificadas aos poucos na thread do mixer em vez
+de inteiras no primeiro uso, o que num núcleo lento travava o jogo por segundos. As demais ficam
+decodificadas dentro de um orçamento de memória (`DS_AUDIO_MB`, padrão 192, 96 no aarch64). O FSB5 remove os cabeçalhos de setup do
 Vorbis; o host os reconstrói com o próprio encoder da libvorbis e confere cada um contra o CRC32 do
 banco (cache em `$DS_HOME_DIR/vorbis_setups.bin`). Os setups de taxa baixa (8–24 kHz) vieram de outro
 build do encoder; o [tools/audio/import_setups.py](tools/audio/import_setups.py) os pega da tabela
