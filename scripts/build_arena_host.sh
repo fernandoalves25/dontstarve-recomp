@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 #   OBJ=build/obj-rel OPT="-O2 -g" OUT=build/dontstarve_host_rel bash scripts/build_arena_host.sh
 OBJ=${OBJ:-build/obj}; OPT=${OPT:--O0 -g}; OUT=${OUT:-build/dontstarve_host}
 mkdir -p "$OBJ"
-HOSTDEFS="-DRECOMP_STRICT_ICALL -DRECOMP_LOCAL_REGS -DRECOMP_HOST_SETJMP -DRECOMP_X87_WINDOW -DRECOMP_X87_LOCAL -DRECOMP_MEM_BASE=0x100000000ull -DRECOMP_MEM_QUAL="
+HOSTDEFS="-DRECOMP_STRICT_ICALL -DRECOMP_LOCAL_REGS -DRECOMP_HOST_SETJMP -DRECOMP_X87_WINDOW -DRECOMP_X87_LOCAL -DRECOMP_MEM_BASE=0x100000000ull -DRECOMP_MEM_QUAL= -DRECOMP_LCACHE_BITS=16 -DRECOMP_SETJMP_VA0=0x785926F0u -DRECOMP_SETJMP_VA1=0x785926B0u"
 # COVERAGE=1 must match the guest build: records executed functions.
 [ "${COVERAGE:-0}" = 1 ] && HOSTDEFS="$HOSTDEFS -DRECOMP_TRACE"
 HOSTINC="-I pcrecomp/runtime/recomp32 -I pcrecomp/runtime/win32hle -I src/runtime"

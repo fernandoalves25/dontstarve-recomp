@@ -34,7 +34,11 @@ which is light for the Mali GPU. The CPU side decides the frame rate.
 | Flags across calls only where read: 2 of 106,297 call sites in the exe read flags a callee returns, so 26,143 returns stop publishing them | ~same on x86 |
 | Native `_getptd_noexit` (the CRT's per-thread data, ~2,000 calls a frame, 4 imports each) | |
 
-The last three remove instructions the Xeon's out-of-order core hid (the
+| FPU window only where it pays: the x87-locals test missed the light `_P` calls, so 1,751 functions (Lua's `luaH_get` among them: 10 FPU ops) loaded and stored 16 values per call; now 918 (16+ FPU ops, 8 per call) | |
+| Indirect calls: the call-target cache is read inline, the setjmp test is two compares, release builds drop the crash-report ring (`RECOMP_NO_ICALL_TRACE`) | |
+| aarch64 without PIE: a PIE reached every global (the guest registers, the x87 stack, the counters) through the GOT, two loads each; aarch64 ld does not relax them as x86's does | (device) |
+
+The last rows remove instructions the Xeon's out-of-order core hid (the
 reloads read what the callee had just stored); the in-order Cortex-A35 runs
 every instruction, so they should count more there.
 
@@ -61,6 +65,11 @@ so 4.5 ms here is very roughly **35–45 ms per frame there (~22–28 fps)**,
 before the Mali driver's own CPU work. These figures are estimates until
 someone runs it on the device. Ways forward, largest first:
 
+0. **Measured on the device** (by the user): ~7 fps, ~130 ms of work per
+   frame, far below the estimate. Fixed since: the x87 window only where it
+   pays, indirect calls without a call into the cache, and the aarch64 build
+   without PIE. The built-in profiler (`DS_SAMPLE`, on in the launcher)
+   shows in the device's log where the rest goes.
 1. ~~The lifted calling convention~~: done (callee-saved trust, flags).
 2. **A native Lua VM.** Run `luaV_execute` and the table functions as native
    C on the guest's own Lua state layout (32-bit pointers in guest memory).
@@ -101,6 +110,11 @@ Resultado: **~12 → 4,5 ms de trabalho por frame**.
 thread, então 4,5 ms aqui são grosso modo **35–45 ms lá (~22–28 fps)**, antes
 do custo de CPU do driver Mali. São estimativas até alguém rodar no
 aparelho. Próximos passos, do maior para o menor:
+0. medido no aparelho (o usuário): ~7 fps, ~130 ms de trabalho por frame, bem
+   abaixo da estimativa. Correções desde então: a janela x87 só onde compensa
+   (1.751 → 918 funções), chamadas indiretas sem chamada ao cache, e o build
+   aarch64 sem PIE (cada global era lida pela GOT). O perfil embutido
+   (`DS_SAMPLE`) mostra no log do aparelho para onde vai o resto;
 1. ~~a convenção de chamada do código liftado~~: feito (registradores
    preservados e flags só onde são lidas, patch 0020, conferido com builds
    `RECOMP_ABI_CHECK`);
