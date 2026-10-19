@@ -30,6 +30,7 @@ uint32_t  g_eax, g_ecx, g_edx, g_esp, g_ebx, g_esi, g_edi, g_ebp;
 double    g_st[8];                  /* with RECOMP_X87_WINDOW the header owns the x87 storage */
 #endif
 int       g_fp_top;
+
 uint16_t  g_fpu_cw = 0x027F;
 uint16_t  g_seg_cs, g_seg_ds, g_seg_es, g_seg_fs, g_seg_gs, g_seg_ss;
 uint64_t  g_mm[8];
@@ -396,12 +397,22 @@ void ds_register_manual(uint32_t va, recomp_func_t fn) {
  * the override scan plus a binary search of ~25,000 entries. Import shims
  * (SHIM_BASE and up) are not cached: recomp_lookup_import notes which import
  * runs. Only the thread holding the machine runs lifted code: no locking. */
+static uint32_t g_last_import_va;                  /* the shim VA being run (ds_last_import_va) */
+extern uint64_t g_prof_imports;
+static void ds_unimplemented_import(void);
 #define LCACHE_BITS 16
 static struct { uint32_t va; recomp_func_t fn; } g_lcache[1u << LCACHE_BITS];
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     uint32_t h = (va * 2654435761u) >> (32 - LCACHE_BITS);
-    if (g_lcache[h].va == va && va) return g_lcache[h].fn;
-    if (va >= SHIM_BASE_VA) return NULL;
+    if (g_lcache[h].va == va && va) {
+        if (va >= SHIM_BASE_VA) { g_last_import_va = va; g_prof_imports++; }   /* what lookup_import notes */
+        return g_lcache[h].fn;
+    }
+    if (va >= SHIM_BASE_VA) {                       /* an import shim: cache it too */
+        recomp_func_t f = recomp_lookup_import(va);
+        if (f && f != ds_unimplemented_import && !ds_trace) { g_lcache[h].va = va; g_lcache[h].fn = f; }
+        return f;
+    }
     recomp_func_t f = NULL;
     for (int i = 0; i < g_manual_n; i++) if (g_manual[i].va == va) { f = g_manual[i].fn; break; }
     if (!f) f = recomp_lookup(va);
@@ -490,7 +501,6 @@ void ds_prof_imports_top(uint32_t frames) {                 /* the busiest impor
     memset(g_prof_shim, 0, sizeof g_prof_shim);
 }
 static int g_shim_n;
-static uint32_t g_last_import_va;
 uint32_t ds_last_import_va(void) { return g_last_import_va; }   /* the shim VA being run */
 
 int ds_register(const ds_shim *shims) {
@@ -761,6 +771,11 @@ int main(int argc, char **argv) {
     ds_register_manual(0x7855B310u, ds_memmove);       /* msvcr90 memmove */
     ds_register_manual(0x785947D8u, ds_longjmp);       /* msvcr90 longjmp */
     recomp_yield_hook = ds_yield;                      /* RECOMP_BACKEDGE preemption point */
+    /* CPUID leaf 1 ECX as the guest sees it: SSE3 only. The exe carries AES-NI,
+     * SSSE3, SSE4.1 and PCLMULQDQ routines (an embedded crypto library) that it
+     * picks by CPUID; those 725 instructions are not translated, so the guest
+     * must take its generic paths. (EDX keeps x87/MMX/SSE/SSE2.) */
+    g_cpuid_ecx1 = 0x00000001u;
     fprintf(stderr, "[ds] registered %d HLE shims; lifted DLLs: msvcr90=%d msvcp90=%d\n",
             g_shim_n, have_r, have_p);
 

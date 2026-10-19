@@ -1,5 +1,5 @@
 name = "Bigger HUD for small screens"
-description = "Scales the in-game HUD (inventory, status, crafting tabs, map) and the hover/speech text, for 3.5\" handheld screens like the R36S. Stacks with the game's own HUD Size option."
+description = "Scales the in-game HUD (inventory, status, crafting tabs, map) and the hover/speech text, for 3.5\" handheld screens like the R36S. Stacks with the game's own HUD Size option. Optional 30 fps cap."
 author = "dontstarve-recomp"
 version = "1.0"
 forumthread = ""
@@ -22,5 +22,15 @@ configuration_options = {
             { description = "1.5x", data = 1.5 },
         },
         default = 1.4,
+    },
+    {
+        name = "fps",
+        label = "Frame rate cap",
+        hover = "30 halves the work per second; the game itself simulates at 30 Hz",
+        options = {
+            { description = "60", data = 60 },
+            { description = "30", data = 30 },
+        },
+        default = 60,
     },
 }

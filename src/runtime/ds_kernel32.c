@@ -253,7 +253,22 @@ static __thread uint32_t t_fls[NSLOT];
 static void sh_TlsAlloc(void)    { RET(g_tls_next < NSLOT ? (uint32_t)g_tls_next++ : 0xFFFFFFFFu, 0); }
 static void sh_TlsFree(void)     { RET(1, 1); }
 static void sh_TlsSetValue(void) { uint32_t i = A32(0); if (i < NSLOT) t_tls[i] = A32(1); RET(1, 2); }
-static void sh_TlsGetValue(void) { uint32_t i = A32(0); RET(i < NSLOT ? t_tls[i] : 0, 1); }
+static struct { uint32_t fn, n; } g_tls_from[64];       /* DS_PROF: who asks (g_cur_func) */
+void ds_prof_tls_top(void) {
+    for (int r = 0; r < 5; r++) {
+        int b = -1; for (int i = 0; i < 64; i++) if (g_tls_from[i].n && (b < 0 || g_tls_from[i].n > g_tls_from[b].n)) b = i;
+        if (b < 0) break;
+        fprintf(stderr, "[prof]   TlsGetValue from 0x%08X: %u\n", g_tls_from[b].fn, g_tls_from[b].n); g_tls_from[b].n = 0;
+    }
+    memset(g_tls_from, 0, sizeof g_tls_from);
+}
+static void sh_TlsGetValue(void) {
+    static int prof = -1; if (prof < 0) prof = getenv("DS_PROF") != NULL;
+    if (prof)
+        for (int k = 0; k < 64; k++)
+            if (g_tls_from[k].fn == g_cur_func || !g_tls_from[k].n) { g_tls_from[k].fn = g_cur_func; g_tls_from[k].n++; break; }
+    uint32_t i = A32(0); RET(i < NSLOT ? t_tls[i] : 0, 1);
+}
 
 /* ===================== critical sections =====================
  * The CRT initialises a CS struct in guest memory and then reads its fields, so

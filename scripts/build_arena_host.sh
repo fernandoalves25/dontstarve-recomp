@@ -26,7 +26,7 @@ done
 echo "=== link arena host ==="
 # *recomp_*.o matches the exe (recomp_*.o) and the lifted CRT DLLs
 # (msvcr90_recomp_*.o, msvcp90_recomp_*.o) once they are built.
-gcc -g -rdynamic -o "$OUT" \
+gcc -g -rdynamic ${LDEXTRA:-} -o "$OUT" \
     "$OBJ"/*recomp_*.o "$OBJ"/ds_host.o "$OBJ"/ds_kernel32.o "$OBJ"/ds_win32.o "$OBJ"/ds_user32.o "$OBJ"/ds_file.o "$OBJ"/ds_net.o "$OBJ"/ds_thread.o "$OBJ"/ds_gles.o "$OBJ"/ds_input.o "$OBJ"/ds_fmod.o "$OBJ"/ds_sdl.o "$OBJ"/ds_audio.o \
     $SDLLIBS -lvorbisenc -lvorbis -logg -lz -lEGL -lGLESv2 -lm -lpthread > build/link.log 2>&1
 rc=$?; head -40 build/link.log; echo "link exit: $rc"

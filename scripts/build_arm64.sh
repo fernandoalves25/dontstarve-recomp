@@ -18,6 +18,9 @@ OBJ=build/obj-arm64
 mkdir -p "$OBJ"
 DEFS="-DRECOMP_STRICT_ICALL -DRECOMP_LOCAL_REGS -DRECOMP_HOST_SETJMP -DRECOMP_X87_WINDOW -DRECOMP_X87_LOCAL -DRECOMP_MEM_BASE=0x100000000ull -DRECOMP_MEM_QUAL="
 FLAGS="-O2 -mcpu=cortex-a35 -w -fwrapv -fno-strict-aliasing -fexceptions"   # RK3326 = Cortex-A35
+# PGO=dir: profile-guided build from a training run's .gcda files, renamed for
+# this object directory (#...#build#obj-arm64#<file>.gcda; see docs/PERFORMANCE.md)
+[ -n "${PGO:-}" ] && FLAGS="$FLAGS -fprofile-use=$PGO -fprofile-partial-training -fprofile-correction"
 export CC OBJ DEFS FLAGS
 : > build/arm64_errors.log
 echo "guest start: $(date +%T)"

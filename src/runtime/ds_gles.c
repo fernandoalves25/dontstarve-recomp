@@ -217,6 +217,8 @@ static void sh_eglSwapBuffers(void) {            /* (dpy, surface) */
         static int prof = -1; if (prof < 0) prof = getenv("DS_PROF") != NULL;
         if (prof && nf) {
             extern uint64_t g_prof_mmbytes, g_prof_mmcalls, g_prof_imports, g_prof_draws, g_prof_verts;
+            extern uint32_t g_icall_count; static uint32_t last_ic;
+            fprintf(stderr, "[prof] per frame: %u indirect calls\n", (g_icall_count - last_ic) / nf); last_ic = g_icall_count;
             fprintf(stderr, "[prof] per frame: %llu draws (%llu vertices), %llu import calls, guest memcpy %llu calls %llu KB, "
                     "glBufferData %llu calls %llu KB\n",
                     (unsigned long long)(g_prof_draws / nf), (unsigned long long)(g_prof_verts / nf),
@@ -224,7 +226,7 @@ static void sh_eglSwapBuffers(void) {            /* (dpy, surface) */
                     (unsigned long long)(g_prof_mmcalls / nf), (unsigned long long)(g_prof_mmbytes / nf >> 10),
                     (unsigned long long)(g_prof_bufcalls / nf), (unsigned long long)(g_prof_bufbytes / nf >> 10));
             extern void ds_prof_imports_top(uint32_t);
-            if (g_frame % 600 == 0) { extern void ds_prof_qpc_top(void); ds_prof_imports_top(nf); ds_prof_qpc_top(); }
+            if (g_frame % 600 == 0) { extern void ds_prof_qpc_top(void), ds_prof_tls_top(void); ds_prof_imports_top(nf); ds_prof_qpc_top(); ds_prof_tls_top(); }
             g_prof_mmbytes = g_prof_mmcalls = g_prof_bufbytes = g_prof_bufcalls = g_prof_imports = g_prof_draws = g_prof_verts = 0;
         }
     }
