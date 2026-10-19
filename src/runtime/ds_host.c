@@ -26,8 +26,11 @@
 
 /* ============================================================ register file */
 uint32_t  g_eax, g_ecx, g_edx, g_esp, g_ebx, g_esi, g_edi, g_ebp;
-double    g_st[8];
+#ifndef RECOMP_X87_WINDOW
+double    g_st[8];                  /* with RECOMP_X87_WINDOW the header owns the x87 storage */
+#endif
 int       g_fp_top;
+
 uint16_t  g_fpu_cw = 0x027F;
 uint16_t  g_seg_cs, g_seg_ds, g_seg_es, g_seg_fs, g_seg_gs, g_seg_ss;
 uint64_t  g_mm[8];
@@ -145,9 +148,21 @@ void ds_fatal(const char *fmt, ...) {
 static uint32_t g_brk = ARENA_HEAP0;
 
 static int arena_init(void) {
+#ifdef RECOMP_MEM_BASE
+    /* the lifted code adds this constant (recomp_types.h): the arena must be there */
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+    void *want = (void *)(uintptr_t)(RECOMP_MEM_BASE);
+    void *p = mmap(want, ARENA_SIZE, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+    if (p != MAP_FAILED && p != want) { munmap(p, ARENA_SIZE); p = MAP_FAILED; }   /* old kernels: a hint only */
+    if (p == MAP_FAILED) { fprintf(stderr, "[ds] cannot map the arena at %p (RECOMP_MEM_BASE): ", want); perror("mmap"); return 0; }
+#else
     void *p = mmap(NULL, ARENA_SIZE, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (p == MAP_FAILED) { perror("mmap arena"); return 0; }
+#endif
     g_mem_base = (ptrdiff_t)(uintptr_t)p;
     fprintf(stderr, "[ds] arena %llu MB at host %p (g_mem_base=0x%llx)\n",
             (unsigned long long)(ARENA_SIZE >> 20), p, (unsigned long long)g_mem_base);
@@ -212,7 +227,7 @@ static pthread_mutex_t g_mach = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 
 typedef struct {
     uint32_t eax, ecx, edx, esp, ebx, esi, edi, ebp, fs, cur;
-    double st[8]; int fp_top; uint16_t fpu_cw;
+    double st[8]; int64_t st_i64[8]; int fp_top; uint16_t fpu_cw;
     uint64_t mm[8];
     V128 xmm[8]; uint32_t mxcsr;   /* live across a preemption point (a loop back-edge), unlike a call */
 } regs_t;
@@ -221,7 +236,8 @@ static void regs_save(regs_t *r) {
     r->eax=g_eax; r->ecx=g_ecx; r->edx=g_edx; r->esp=g_esp;
     r->ebx=g_ebx; r->esi=g_esi; r->edi=g_edi; r->ebp=g_ebp;
     r->fs=g_fs_base; r->cur=g_cur_func;
-    memcpy(r->st, g_st, sizeof g_st); r->fp_top=g_fp_top; r->fpu_cw=g_fpu_cw;
+    memcpy(r->st, g_st, sizeof r->st); memcpy(r->st_i64, g_st_i64, sizeof r->st_i64);
+    r->fp_top=g_fp_top; r->fpu_cw=g_fpu_cw;
     memcpy(r->mm, g_mm, sizeof g_mm);
     memcpy(r->xmm, g_xmm, sizeof g_xmm); r->mxcsr = g_mxcsr;
 }
@@ -229,7 +245,8 @@ static void regs_load(const regs_t *r) {
     g_eax=r->eax; g_ecx=r->ecx; g_edx=r->edx; g_esp=r->esp;
     g_ebx=r->ebx; g_esi=r->esi; g_edi=r->edi; g_ebp=r->ebp;
     g_fs_base=r->fs; g_cur_func=r->cur;
-    memcpy(g_st, r->st, sizeof g_st); g_fp_top=r->fp_top; g_fpu_cw=r->fpu_cw;
+    memcpy(g_st, r->st, sizeof r->st); memcpy(g_st_i64, r->st_i64, sizeof r->st_i64);
+    g_fp_top=r->fp_top; g_fpu_cw=r->fpu_cw;
     memcpy(g_mm, r->mm, sizeof g_mm);
     memcpy(g_xmm, r->xmm, sizeof g_xmm); g_mxcsr = r->mxcsr;
 }
@@ -357,6 +374,7 @@ static recomp_func_t table_lookup(const recomp_dispatch_entry_t *t, uint32_t n, 
     return NULL;
 }
 recomp_func_t recomp_lookup(uint32_t va) {
+    if (va >= 0x7F000000u) return NULL;             /* import shims: no lifted code up there */
     recomp_func_t f = table_lookup(recomp_dispatch_table, recomp_dispatch_count, va);
     if (f) return f;
     if (msvcr90_recomp_dispatch_table && (f = table_lookup(msvcr90_recomp_dispatch_table, msvcr90_recomp_dispatch_count, va))) return f;
@@ -368,14 +386,38 @@ recomp_func_t recomp_lookup(uint32_t va) {
  * whose lifted form does raw return-address surgery incompatible with the recomp
  * call model (the "return address" is the RECOMP_RETADDR sentinel). */
 #define MAX_MANUAL 64
+#define SHIM_BASE_VA 0x7F000000u                /* = SHIM_BASE below: import shims live from here */
 static struct { uint32_t va; recomp_func_t fn; } g_manual[MAX_MANUAL];
 static int g_manual_n;
 void ds_register_manual(uint32_t va, recomp_func_t fn) {
     if (g_manual_n < MAX_MANUAL) { g_manual[g_manual_n].va = va; g_manual[g_manual_n].fn = fn; g_manual_n++; }
 }
+/* Every indirect call (C++ virtuals, Lua's C functions, callbacks) asks this
+ * first, so it doubles as the call-target cache: one hashed probe instead of
+ * the override scan plus a binary search of ~25,000 entries. Import shims
+ * (SHIM_BASE and up) are not cached: recomp_lookup_import notes which import
+ * runs. Only the thread holding the machine runs lifted code: no locking. */
+static uint32_t g_last_import_va;                  /* the shim VA being run (ds_last_import_va) */
+extern uint64_t g_prof_imports;
+static void ds_unimplemented_import(void);
+#define LCACHE_BITS 16
+static struct { uint32_t va; recomp_func_t fn; } g_lcache[1u << LCACHE_BITS];
 recomp_func_t recomp_lookup_manual(uint32_t va) {
-    for (int i = 0; i < g_manual_n; i++) if (g_manual[i].va == va) return g_manual[i].fn;
-    return NULL;
+    uint32_t h = (va * 2654435761u) >> (32 - LCACHE_BITS);
+    if (g_lcache[h].va == va && va) {
+        if (va >= SHIM_BASE_VA) { g_last_import_va = va; g_prof_imports++; }   /* what lookup_import notes */
+        return g_lcache[h].fn;
+    }
+    if (va >= SHIM_BASE_VA) {                       /* an import shim: cache it too */
+        recomp_func_t f = recomp_lookup_import(va);
+        if (f && f != ds_unimplemented_import && !ds_trace) { g_lcache[h].va = va; g_lcache[h].fn = f; }
+        return f;
+    }
+    recomp_func_t f = NULL;
+    for (int i = 0; i < g_manual_n; i++) if (g_manual[i].va == va) { f = g_manual[i].fn; break; }
+    if (!f) f = recomp_lookup(va);
+    if (f) { g_lcache[h].va = va; g_lcache[h].fn = f; }
+    return f;
 }
 
 /* Native __EH_prolog (msvcr90 0x7857DF6C). Real code:
@@ -434,8 +476,11 @@ static void ds_seh_prolog4(void) {
  * unresolved ITAIL inside its first big copy. cdecl (dst, src, n) -> dst; VC9's
  * memcpy also tolerates overlap, so both are memmove. Only the return address
  * is popped. */
+uint64_t g_prof_mmbytes, g_prof_mmcalls, g_prof_imports;   /* DS_PROF counters */
+static uint32_t g_prof_shim[4096];                          /* calls per import shim */
 static void ds_memmove(void) {
     uint32_t d = MEM32(g_esp + 4), s = MEM32(g_esp + 8), n = MEM32(g_esp + 12);
+    g_prof_mmbytes += n; g_prof_mmcalls++;
     if (n) memmove(ds_hostptr(d), ds_hostptr(s), n);
     g_eax = d;
     g_esp += 4;
@@ -446,8 +491,16 @@ static void ds_memmove(void) {
 #define SHIM_STEP 16u
 #define MAX_SHIMS 4096
 static struct { const char *name; recomp_func_t fn; uint32_t va; } g_shim[MAX_SHIMS];
+void ds_prof_imports_top(uint32_t frames) {                 /* the busiest imports since the last call */
+    for (int r = 0; r < 12; r++) {
+        int b = -1; for (int i = 0; i < 4096; i++) if (g_prof_shim[i] && (b < 0 || g_prof_shim[i] > g_prof_shim[b])) b = i;
+        if (b < 0) break;
+        fprintf(stderr, "[prof]   %7.0f/frame  %s\n", (double)g_prof_shim[b] / (frames ? frames : 1), g_shim[b].name);
+        g_prof_shim[b] = 0;
+    }
+    memset(g_prof_shim, 0, sizeof g_prof_shim);
+}
 static int g_shim_n;
-static uint32_t g_last_import_va;
 uint32_t ds_last_import_va(void) { return g_last_import_va; }   /* the shim VA being run */
 
 int ds_register(const ds_shim *shims) {
@@ -488,7 +541,7 @@ recomp_func_t recomp_lookup_import(uint32_t va) {
     if (va < SHIM_BASE || va >= SHIM_BASE + SHIM_STEP * (uint32_t)g_shim_n) return NULL;
     uint32_t i = (va - SHIM_BASE) / SHIM_STEP;
     if (i < (uint32_t)g_shim_n && g_shim[i].va == va) {
-        g_last_import_va = va;
+        g_last_import_va = va; g_prof_imports++; g_prof_shim[i]++;
         if (ds_trace) fprintf(stderr, "[hle] %s\n", g_shim[i].name);
         return g_shim[i].fn;
     }
@@ -718,6 +771,11 @@ int main(int argc, char **argv) {
     ds_register_manual(0x7855B310u, ds_memmove);       /* msvcr90 memmove */
     ds_register_manual(0x785947D8u, ds_longjmp);       /* msvcr90 longjmp */
     recomp_yield_hook = ds_yield;                      /* RECOMP_BACKEDGE preemption point */
+    /* CPUID leaf 1 ECX as the guest sees it: SSE3 only. The exe carries AES-NI,
+     * SSSE3, SSE4.1 and PCLMULQDQ routines (an embedded crypto library) that it
+     * picks by CPUID; those 725 instructions are not translated, so the guest
+     * must take its generic paths. (EDX keeps x87/MMX/SSE/SSE2.) */
+    g_cpuid_ecx1 = 0x00000001u;
     fprintf(stderr, "[ds] registered %d HLE shims; lifted DLLs: msvcr90=%d msvcp90=%d\n",
             g_shim_n, have_r, have_p);
 

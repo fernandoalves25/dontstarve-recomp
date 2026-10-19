@@ -147,6 +147,12 @@ What's in the runtime now ([src/runtime](src/runtime)):
 - **Debugging:** `DS_WATCH=va,…` prints a lifted function's arguments on entry (how a Lua error
   without a message got its message back); `DS_SENTINEL=1` catches return-address leaks.
 
+**Speed** ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)): the game's own work per frame went from
+~12 to **4.5 ms** on an x86 Xeon (x87 stack window, FPU registers in locals, fixed guest-memory
+base, call-target cache, no busy-wait in the frame limiter, loop/inlining passes). On the R36S's
+Cortex-A35 that is very roughly 35–45 ms (~22–28 fps) until measured on the device; the next steps
+toward 60 fps are listed there.
+
 Help wanted, in order:
 
 - **On a real R36S:** the SDL2 backend over KMSDRM on the Mali GPU (written, tested with SDL's
@@ -353,6 +359,12 @@ O que já existe no runtime ([src/runtime](src/runtime)):
 - **Debug:** `DS_WATCH=va,…` imprime os argumentos de uma função liftada na entrada (foi assim que
   um erro Lua sem mensagem recuperou a mensagem); `DS_SENTINEL=1` pega vazamento de endereço de
   retorno.
+
+**Velocidade** ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)): o trabalho do próprio jogo por frame
+caiu de ~12 para **4,5 ms** num Xeon x86 (janela da pilha x87, registradores da FPU em locais,
+base fixa da memória do guest, cache de alvos de chamada, sem espera ativa no limitador de frames,
+passes de laço/inlining). No Cortex-A35 do R36S isso dá algo como 35–45 ms (~22–28 fps) até ser
+medido no aparelho; os próximos passos rumo aos 60 fps estão lá.
 
 Procura-se ajuda, nesta ordem:
 
