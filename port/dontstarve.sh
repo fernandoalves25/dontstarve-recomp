@@ -45,7 +45,30 @@ if [ ! -f "$DS_HOME_DIR/.setups_imported" ] && [ -f tools/audio/import_setups.py
     python3 -I tools/audio/import_setups.py && touch "$DS_HOME_DIR/.setups_imported"
 fi
 
+# full clocks while playing: CPU, GPU and memory (devfreq) governors to
+# "performance", the previous ones back on exit. DS_PERF=0 leaves them alone.
+GOVS=()
+if [ "${DS_PERF:-1}" != 0 ]; then
+    for g in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor /sys/class/devfreq/*/governor; do
+        [ -w "$g" ] || [ -n "$ESUDO" ] || continue
+        [ -f "$g" ] || continue
+        old=$(cat "$g" 2>/dev/null) || continue
+        grep -qw performance "$(dirname "$g")/$( [ "${g##*/}" = governor ] && echo available_governors || echo scaling_available_governors)" 2>/dev/null || continue
+        echo performance | $ESUDO tee "$g" >/dev/null 2>&1 && GOVS+=("$g=$old") && echo "governor $g: $old -> performance"
+    done
+fi
+
+# the built-in profiler: every 30 s the log gets CPU per thread, the clocks
+# and the hottest functions (DS_SAMPLE=0 turns it off)
+export DS_SAMPLE=${DS_SAMPLE:-1} DS_SAMPLE_MS=${DS_SAMPLE_MS:-5} DS_SAMPLE_SEC=${DS_SAMPLE_SEC:-30}
+
 $ESUDO chmod +x ./dontstarve_host.aarch64
+# quitting: the game itself ends on Select+Start held for a second; gptokeyb
+# (no key mapping, only PortMaster's kill hotkey) is the fallback if it hangs
+$ESUDO chmod 666 /dev/uinput 2>/dev/null
+[ -n "$GPTOKEYB" ] && $GPTOKEYB "dontstarve_host.aarch64" &
 ./dontstarve_host.aarch64 --run-entry "$GAMEDIR/gamedata/bin/dontstarve.exe"
+
+for e in "${GOVS[@]}"; do echo "${e#*=}" | $ESUDO tee "${e%%=*}" >/dev/null 2>&1; done
 
 pm_finish

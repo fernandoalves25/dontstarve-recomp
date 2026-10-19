@@ -46,7 +46,7 @@ elif [ -n "${SYSROOT:-}" ]; then
     LIBDIR="--sysroot=$SYSROOT -B$SYSROOT/usr/lib/$MA -L$SYSROOT/lib/$MA -L$SYSROOT/usr/lib/$MA \
             -Wl,-rpath-link=$SYSROOT/lib/$MA:$SYSROOT/usr/lib/$MA"
 fi
-for f in ds_host ds_kernel32 ds_win32 ds_user32 ds_file ds_net ds_thread ds_gles ds_input ds_fmod ds_audio ds_sdl; do
+for f in ds_host ds_kernel32 ds_win32 ds_user32 ds_file ds_net ds_thread ds_gles ds_input ds_fmod ds_audio ds_sdl ds_sample; do
     $CC -c $FLAGS -g $SDLDEF -I pcrecomp/runtime/recomp32 -I pcrecomp/runtime/win32hle -I src/runtime \
         $DEFS "src/runtime/$f.c" -o "$OBJ/$f.o" 2>>build/arm64_errors.log \
         || echo "FAIL: $f.c" >>build/arm64_errors.log
@@ -56,7 +56,7 @@ if [ "${1:-}" = link ]; then
     # the libraries' own dependencies (ALSA, X11, ...) are the device's business
     $CC $LIBDIR -rdynamic -Wl,--allow-shlib-undefined -o build/dontstarve_host.aarch64 "$OBJ"/*.o \
         -Wl,-Bstatic -lvorbisenc -lvorbis -logg -lz -Wl,-Bdynamic \
-        -lSDL2 -lEGL -lGLESv2 -lm -lpthread && echo "LINK_OK build/dontstarve_host.aarch64"
+        -lSDL2 -lEGL -lGLESv2 -lm -lpthread -ldl && echo "LINK_OK build/dontstarve_host.aarch64"
     echo "newest glibc symbol needed: $(aarch64-linux-gnu-objdump -T build/dontstarve_host.aarch64 \
         | grep -o 'GLIBC_[0-9.]*' | sort -t. -k2,2n -k3,3n -u | tail -1)"
 fi

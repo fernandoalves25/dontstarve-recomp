@@ -164,6 +164,18 @@ static int arena_init(void) {
     if (p == MAP_FAILED) { perror("mmap arena"); return 0; }
 #endif
     g_mem_base = (ptrdiff_t)(uintptr_t)p;
+#ifdef MADV_HUGEPAGE
+    /* 2 MB pages where the kernel has them (transparent_hugepage "madvise" or
+       "always"): the game's memory walks (Lua tables, the entity lists) miss
+       the small TLB of an in-order core far less. DS_THP=0 keeps 4 KB pages. */
+    { const char *e = getenv("DS_THP");
+      if (!e || strcmp(e, "0")) {
+          int r = madvise(p, ARENA_SIZE, MADV_HUGEPAGE);
+          char thp[96] = ""; FILE *f = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
+          if (f) { if (!fgets(thp, sizeof thp, f)) thp[0] = 0; fclose(f); thp[strcspn(thp, "\n")] = 0; }
+          fprintf(stderr, "[ds] huge pages: madvise %s, kernel: %s\n", r ? "refused" : "ok", thp[0] ? thp : "no THP");
+      } }
+#endif
     fprintf(stderr, "[ds] arena %llu MB at host %p (g_mem_base=0x%llx)\n",
             (unsigned long long)(ARENA_SIZE >> 20), p, (unsigned long long)g_mem_base);
     return 1;
@@ -774,6 +786,7 @@ int main(int argc, char **argv) {
     int have_p = (ds_pe_load(pp, &img_p) == 0); if (have_p) g_msvcp_img = &img_p;
 
     ds_host_init();
+    { extern void ds_sample_init(void); ds_sample_init(); }   /* DS_SAMPLE=1: profile into the log */
     ds_register_manual(0x7857DF6Cu, ds_eh_prolog);     /* msvcr90 __EH_prolog */
     ds_register_manual(0x7858CF00u, ds_seh_prolog4);   /* msvcr90 _SEH_prolog4 */
     ds_register_manual(0x7855AE20u, ds_memmove);       /* msvcr90 memcpy */

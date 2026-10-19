@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "ds_hle.h"
 
 #ifdef DS_SDL
@@ -84,8 +85,24 @@ static uint32_t vk_of(SDL_Keycode k) {
     return 0;
 }
 /* Turn pending SDL events into Win32 messages (post(msg, wParam, lParam)). */
+/* The handhelds' quit shortcut: Select + Start held together for a second
+ * ends the game (PortMaster's usual hotkey; nothing in the game uses both at
+ * once). The world is as of the last autosave, as with gptokeyb's kill. */
+static void quit_hotkey(void) {
+    static uint32_t since;
+    if (!g_pad || !SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_BACK)
+               || !SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_START)) { since = 0; return; }
+    uint32_t now = SDL_GetTicks();
+    if (!since) since = now ? now : 1;
+    else if (now - since >= 1000) {
+        fprintf(stderr, "[sdl] Select+Start: quitting\n"); fflush(stderr);
+        _exit(0);
+    }
+}
+
 void ds_sdl_pump(void (*post)(uint32_t msg, uint32_t wp, uint32_t lp)) {
     SDL_Event e;
+    quit_hotkey();
     while (SDL_PollEvent(&e)) {
         switch (e.type) {
         case SDL_QUIT: post(0x0010u /*WM_CLOSE*/, 0, 0); break;
@@ -127,6 +144,7 @@ int ds_sdl_xinput(uint16_t *buttons, uint8_t *lt, uint8_t *rt, int16_t thumbs[4]
         { SDL_CONTROLLER_BUTTON_A, 0x1000 }, { SDL_CONTROLLER_BUTTON_B, 0x2000 },
         { SDL_CONTROLLER_BUTTON_X, 0x4000 }, { SDL_CONTROLLER_BUTTON_Y, 0x8000 },
     };
+    quit_hotkey();
     uint16_t b = 0;
     for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) if (SDL_GameControllerGetButton(g_pad, map[i].b)) b |= map[i].x;
     *buttons = b;

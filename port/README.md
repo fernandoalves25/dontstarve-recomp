@@ -41,6 +41,16 @@ own Options → HUD Size. To turn it off: Mods menu, or `DS_BIG_HUD=0`.
 The device's buttons act as an Xbox pad, which Don't Starve supports out of
 the box: the game uses its own controller layout and shows the buttons on
 screen.
+**Select + Start**, held for a second, quits the game (progress is as of the
+last autosave, like any PortMaster quit hotkey).
+
+## Speed and the log
+
+The launcher sets the CPU, GPU and memory clocks to "performance" while the
+game runs (`DS_PERF=0` leaves them alone) and puts them back afterwards.
+Every 30 s, `log.txt` gets a short profile (lines starting `[sample]`): the
+clocks, the CPU time of each thread and the hottest functions. Sharing that
+file is the most useful report of a slow spot. `DS_SAMPLE=0` turns it off.
 
 ---
 
@@ -86,3 +96,13 @@ Options → HUD Size do próprio jogo. Para desligar: menu Mods, ou `DS_BIG_HUD=
 
 Os botões do aparelho funcionam como um controle de Xbox, que o Don't Starve
 já suporta: o jogo usa o próprio layout de controle e mostra os botões na tela.
+**Select + Start**, segurados por um segundo, fecham o jogo (o progresso fica
+o do último autosave, como em qualquer atalho de saída do PortMaster).
+
+## Velocidade e o log
+
+O lançador põe os clocks de CPU, GPU e memória em "performance" enquanto o
+jogo roda (`DS_PERF=0` não mexe neles) e os devolve depois. A cada 30 s o
+`log.txt` recebe um perfil curto (linhas que começam com `[sample]`): os
+clocks, o tempo de CPU de cada thread e as funções mais quentes. Mandar esse
+arquivo é o relato mais útil de um trecho lento. `DS_SAMPLE=0` desliga.
