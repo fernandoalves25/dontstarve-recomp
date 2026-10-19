@@ -34,18 +34,29 @@ int ds_sdl_open(int w, int h) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "[sdl] SDL_Init: %s\n", SDL_GetError()); return -1;
     }
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-    Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN;
-    if (!getenv("DS_WINDOWED")) flags |= SDL_WINDOW_FULLSCREEN;
-    g_win = SDL_CreateWindow("Don't Starve", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, flags);
-    if (!g_win) { fprintf(stderr, "[sdl] SDL_CreateWindow: %s\n", SDL_GetError()); return -1; }
-    g_ctx = SDL_GL_CreateContext(g_win);
-    if (!g_ctx) { fprintf(stderr, "[sdl] SDL_GL_CreateContext: %s\n", SDL_GetError()); return -1; }
+    /* the GLES2 framebuffer the game wants (24-bit depth, 8-bit stencil), then
+     * what a smaller driver may offer instead: an untested GPU must not keep
+     * the game from starting */
+    static const struct { int depth, stencil, full; } tries[] = {
+        { 24, 8, 1 }, { 16, 8, 1 }, { 24, 0, 1 }, { 16, 0, 1 }, { 16, 0, 0 } };
+    Uint32 flags = 0;
+    for (size_t t = 0; t < sizeof tries / sizeof tries[0] && !g_ctx; t++) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, tries[t].depth);
+        SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, tries[t].stencil);
+        flags = SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN;
+        if (tries[t].full && !getenv("DS_WINDOWED")) flags |= SDL_WINDOW_FULLSCREEN;
+        if (g_win) { SDL_DestroyWindow(g_win); g_win = NULL; }
+        g_win = SDL_CreateWindow("Don't Starve", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, flags);
+        if (!g_win) { fprintf(stderr, "[sdl] SDL_CreateWindow (depth %d, stencil %d): %s\n", tries[t].depth, tries[t].stencil, SDL_GetError()); continue; }
+        g_ctx = SDL_GL_CreateContext(g_win);
+        if (!g_ctx) fprintf(stderr, "[sdl] SDL_GL_CreateContext (depth %d, stencil %d): %s\n", tries[t].depth, tries[t].stencil, SDL_GetError());
+        else if (t) fprintf(stderr, "[sdl] using depth %d, stencil %d\n", tries[t].depth, tries[t].stencil);
+    }
+    if (!g_ctx) return -1;
     SDL_GL_SetSwapInterval(1);
     SDL_ShowCursor(SDL_DISABLE);
     for (int i = 0; i < SDL_NumJoysticks() && !g_pad; i++)
