@@ -355,6 +355,15 @@ static void ds_longjmp(void) {                 /* msvcr90 longjmp(jmp_buf, int) 
     longjmp(j->host, 1);
 }
 
+/* RECOMP_ABI_CHECK builds: a light call got a callee-saved register back changed */
+void recomp_abi_violation(uint32_t caller, const char *callee, uint32_t va, int reg, uint32_t was, uint32_t now) {
+    static const char *names[] = { "ebx", "esi", "edi", "ebp" };
+    static int n;
+    if (n++ < 40)
+        fprintf(stderr, "[abi] %s changed by %s (0x%08X) called from 0x%08X: 0x%08X -> 0x%08X\n",
+                names[reg], callee, va, caller, was, now);
+}
+
 /* ============================================================ dispatch
  * The exe and each lifted DLL (msvcr90, msvcp90) have their own dispatch table,
  * each sorted by VA over a disjoint range; search them in turn. The DLL tables

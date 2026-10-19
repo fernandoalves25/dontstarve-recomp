@@ -72,6 +72,8 @@ int       ds_block_begin(void);                           /* release the machine
 void      ds_yield(void);                                 /* preemption point: let a waiting guest thread run */
 void      ds_block_end(int depth);
 uint32_t  hle_call_guest(uint32_t va, int nargs, const uint32_t *args);
+void      ds_register_manual(uint32_t va, recomp_func_t fn);   /* a native body for a lifted VA */
+uint32_t  ds_thread_id(void);                                   /* the guest thread id (ds_thread.c) */
 
 /* ---- host services ---- */
 void      ds_fatal(const char *fmt, ...);
