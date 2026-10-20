@@ -1,6 +1,6 @@
 #!/bin/bash
 # PortMaster launcher for the native (recompiled) Don't Starve on the R36S.
-# Layout under ports/dontstarve/:
+# Layout under ports/dontstarve-recomp/:
 #   dontstarve_host.aarch64   this repo's build (scripts/build_arm64.sh)
 #   gamedata/bin/dontstarve.exe   YOUR DRM-free standalone exe (the lifted code was built from it)
 #   gamedata/data/, gamedata/mods/  YOUR game data (copied from your install)
@@ -19,12 +19,12 @@ source "$controlfolder/control.txt"
 [ -f "${controlfolder}/mod_${CFW_NAME}.txt" ] && source "${controlfolder}/mod_${CFW_NAME}.txt"
 get_controls
 
-GAMEDIR="/$directory/ports/dontstarve"
+GAMEDIR="/$directory/ports/dontstarve-recomp"
 cd "$GAMEDIR" || exit 1
 > "$GAMEDIR/log.txt" && exec > >(tee "$GAMEDIR/log.txt") 2>&1
 
 for f in gamedata/bin/dontstarve.exe gamedata/data crt/msvcr90.dll crt/msvcp90.dll; do
-    [ -e "$f" ] || { echo "missing ports/dontstarve/$f -- see ports/dontstarve/README.md"; pm_finish; exit 1; }
+    [ -e "$f" ] || { echo "missing ports/dontstarve-recomp/$f -- see ports/dontstarve-recomp/README.md"; pm_finish; exit 1; }
 done
 
 export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"

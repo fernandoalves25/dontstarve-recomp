@@ -8,7 +8,7 @@ there is no emulator and no box64. **You need your own copy of the game.**
 ## What to copy
 
 Copy these files from your **DRM-free standalone** install (Klei's own build,
-not the Steam one) into `ports/dontstarve/`:
+not the Steam one) into `ports/dontstarve-recomp/`:
 
 | From your install | To |
 |---|---|
@@ -56,7 +56,7 @@ sem emulador e sem box64. **Você precisa da sua própria cópia do jogo.**
 ## O que copiar
 
 Copie estes arquivos da sua instalação **standalone DRM-free** (o build da
-própria Klei, não o da Steam) para `ports/dontstarve/`:
+própria Klei, não o da Steam) para `ports/dontstarve-recomp/`:
 
 | Da sua instalação | Para |
 |---|---|

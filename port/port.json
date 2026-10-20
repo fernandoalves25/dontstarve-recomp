@@ -1,13 +1,13 @@
 {
   "version": 2,
   "name": "dontstarve-recomp.zip",
-  "items": ["dontstarve.sh", "dontstarve"],
+  "items": ["dontstarve-recomp.sh", "dontstarve-recomp"],
   "items_opt": [],
   "attr": {
     "title": "Don't Starve (native recompilation)",
     "porter": ["Fernando Alves"],
     "desc": "Don't Starve recompiled from x86 to native ARM64 C: no emulator, no box64. Bring your own DRM-free standalone copy of the game.",
-    "inst": "Copy bin/dontstarve.exe, data/ and mods/ from your DRM-free standalone install to ports/dontstarve/gamedata/, and msvcr90.dll + msvcp90.dll (VC9 x86 runtime) to ports/dontstarve/crt/. See README.md.",
+    "inst": "Copy bin/dontstarve.exe, data/ and mods/ from your DRM-free standalone install to ports/dontstarve-recomp/gamedata/, and msvcr90.dll + msvcp90.dll (VC9 x86 runtime) to ports/dontstarve-recomp/crt/. See README.md.",
     "genres": ["adventure", "survival"],
     "image": null,
     "rtr": false,

@@ -1,3 +1,5 @@
 # Shell scripts run under WSL bash — keep LF even on Windows checkouts.
 *.sh text eol=lf
 *.patch text eol=lf
+# The box64 port is copied to the device as-is: its launcher and port.cfg break with CRLF.
+box64-port/** text eol=lf
