@@ -1,7 +1,7 @@
 name = "Bigger HUD for small screens"
-description = "Scales the in-game HUD (inventory, status, crafting tabs, map) and the hover/speech text, for 3.5\" handheld screens like the R36S. Stacks with the game's own HUD Size option. Optional 30 fps cap."
+description = "Scales the in-game HUD (inventory, status, crafting tabs, map) and the hover/speech text, for 3.5\" handheld screens like the R36S. Stacks with the game's own HUD Size option. Bigger text everywhere (Text size). Optional 30 fps cap."
 author = "dontstarve-recomp"
-version = "1.0"
+version = "1.1"
 forumthread = ""
 api_version = 6
 dont_starve_compatible = true
@@ -22,6 +22,18 @@ configuration_options = {
             { description = "1.5x", data = 1.5 },
         },
         default = 1.4,
+    },
+    {
+        name = "text",
+        label = "Text size",
+        hover = "Every text in the game: HUD items, recipes, menus, dialogs",
+        options = {
+            { description = "1.0x", data = 1.0 },
+            { description = "1.1x", data = 1.1 },
+            { description = "1.25x", data = 1.25 },
+            { description = "1.4x", data = 1.4 },
+        },
+        default = 1.25,
     },
     {
         name = "fps",

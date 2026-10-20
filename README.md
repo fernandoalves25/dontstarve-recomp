@@ -13,6 +13,17 @@
 > ⚠️ **No game files are included.** This repo holds only original tooling and runtime.
 > You need your own legally obtained copy of Don't Starve. / **Nenhum arquivo do jogo é incluído.**
 
+### Two ways to play on the R36S / Dois jeitos de jogar no R36S
+
+| | **Native recompilation** (this README) | **box64 port** → [box64-port/](box64-port/README.md) |
+|---|---|---|
+| EN | Windows exe recompiled to native ARM64 C. **Experimental**, ~12 fps in a world. | Official Linux build emulated by box64, with the sound fixes. **Playable today**, ~20–25 fps. |
+| PT | Exe de Windows recompilado para C nativo ARM64. **Experimental**, ~12 fps no mundo. | Build Linux oficial emulado pelo box64, com as correções de som. **Jogável hoje**, ~20–25 fps. |
+
+The two are independent: different game files (Windows standalone vs GOG Linux), different
+PortMaster folders. / São independentes: arquivos do jogo diferentes (standalone de Windows vs
+Linux da GOG) e pastas do PortMaster diferentes.
+
 ---
 
 ## English
@@ -96,7 +107,7 @@ frames in an SDL window with an SDL game controller as XInput pad 0. The whole t
 **cross-compiles for aarch64** at `-O2` ([scripts/build_arm64.sh](scripts/build_arm64.sh)) against
 an Ubuntu 18.04 sysroot, so the binary needs only **glibc 2.17** (ArkOS has 2.30); under
 `qemu-aarch64` it boots and draws the same main menu. A PortMaster launcher is in
-[port/dontstarve.sh](port/dontstarve.sh).
+[port/dontstarve-recomp.sh](port/dontstarve-recomp.sh).
 
 **Milestone M6: the main menu runs natively.** The recompiled `dontstarve.exe` (the DRM-free
 standalone build; 16,146 functions, 0 lift failures) boots through the CRT, creates its window,
@@ -217,7 +228,7 @@ bash scripts/build_guest_obj.sh && bash scripts/build_arena_host.sh
 # 5. R36S (aarch64, glibc 2.17): sysroot, cross-build, then the PortMaster folder
 python3 scripts/make_sysroot_bionic.py
 SYSROOT=$PWD/build/sysroot-arm64 bash scripts/build_arm64.sh link     # build/dontstarve_host.aarch64
-#    ports/dontstarve/: the binary, port/dontstarve.sh, gamedata/{bin,data,mods}, crt/msvc[rp]90.dll
+#    ports/dontstarve-recomp/: the binary, port/dontstarve-recomp.sh, gamedata/{bin,data,mods}, crt/msvc[rp]90.dll
 ```
 
 ---
@@ -306,7 +317,7 @@ frames numa janela SDL, com um controle SDL como pad XInput 0. A árvore inteira
 cruzado para aarch64** em `-O2` ([scripts/build_arm64.sh](scripts/build_arm64.sh)) contra um sysroot
 do Ubuntu 18.04, então o binário só exige **glibc 2.17** (o ArkOS tem 2.30); sob `qemu-aarch64` ele
 inicializa e desenha o mesmo menu principal. Um lançador do PortMaster está em
-[port/dontstarve.sh](port/dontstarve.sh).
+[port/dontstarve-recomp.sh](port/dontstarve-recomp.sh).
 
 **Marco M6: o menu principal roda nativo.** O `dontstarve.exe` recompilado (o build standalone
 DRM-free; 16.146 funções, 0 falhas de lift) passa pelo CRT, cria a janela, sobe EGL + GLES2,
@@ -402,7 +413,7 @@ Python 3.10+ com `capstone pefile unicorn keystone-engine`.
 Use o seu `dontstarve.exe` **standalone DRM-free** (o build Steam exige o cliente da Steam rodando).
 Para o R36S: `python3 scripts/make_sysroot_bionic.py` e depois
 `SYSROOT=$PWD/build/sysroot-arm64 bash scripts/build_arm64.sh link` (binário aarch64 com glibc 2.17);
-o lançador do PortMaster é o [port/dontstarve.sh](port/dontstarve.sh).
+o lançador do PortMaster é o [port/dontstarve-recomp.sh](port/dontstarve-recomp.sh).
 Os comandos são os mesmos da seção em inglês acima.
 
 ---
